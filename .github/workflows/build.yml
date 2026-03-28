@@ -12,14 +12,15 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write  # 必须授予写权限
+  packages: write
 
 jobs:
   build-windows:
     runs-on: windows-latest
     defaults:
       run:
-        shell: cmd  # 全局强制使用CMD，避免语法冲突
+        shell: cmd
 
     steps:
       - name: 检出仓库代码
@@ -54,7 +55,7 @@ jobs:
           if not exist "ffmpeg_temp" mkdir ffmpeg_temp
           :: 下载FFmpeg精简版
           curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-          :: 单行PowerShell命令处理解压和复制（避免换行符错误）
+          :: 单行PowerShell命令处理解压和复制
           powershell -Command "Expand-Archive -Path 'ffmpeg_temp\ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force; $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1; if ($ffmpeg_exe) { Copy-Item -Path $ffmpeg_exe.FullName -Destination 'dist\package\ffmpeg.exe' -Force; Write-Host '✅ ffmpeg.exe复制成功' } else { Write-Error '❌ 未找到ffmpeg.exe'; exit 1 }"
 
       - name: 整理产物
@@ -86,19 +87,31 @@ jobs:
       - name: 压缩为ZIP包
         shell: powershell
         run: |
-          # PowerShell注释用#（此步骤单独指定shell为powershell）
+          # PowerShell注释用#
           Compress-Archive -Path "dist\package\*" -DestinationPath "dist\ml0987下载器_${{ github.run_id }}.zip"
 
+      # 关键修复：添加GITHUB_TOKEN，确保Release上传成功
       - name: 上传Release
         uses: softprops/action-gh-release@v2
+        if: success()  # 仅步骤成功时上传
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub内置令牌，自动生成无需手动配置
         with:
           tag_name: build-${{ github.run_id }}
           name: 自动构建_${{ github.run_id }}
           body: |
             📦 ml0987视频下载器 Windows版
             - 构建时间：${{ github.run_at }}
-            - 包含：主程序+FFmpeg+配置文件
-            - 解压即运行，无需额外依赖
+            - 包含文件：ml0987下载器.exe + ffmpeg.exe + config.json + 使用说明.txt
+            - 使用方式：解压后直接运行exe，无需额外安装依赖
           files: dist\ml0987下载器_${{ github.run_id }}.zip
           draft: false
           prerelease: false
+
+      # 额外：上传为Artifacts（备用下载方式）
+      - name: 上传Artifacts（备用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml0987下载器_${{ github.run_id }}
+          path: dist\ml0987下载器_${{ github.run_id }}.zip
+          retention-days: 30  # 保留30天
