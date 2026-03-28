@@ -43,36 +43,39 @@ jobs:
           pyinstaller --onefile --windowed --name "ml0987下载器" app.py
         shell: cmd
       
-      # 5. 自动下载 Windows 版 ffmpeg（关键新增步骤）
+      # 5. 提前创建产物目录（核心修复：解决路径不存在问题）
+      - name: 提前创建打包目录
+        run: |
+          mkdir -p dist\package
+        shell: cmd
+      
+      # 6. 自动下载 Windows 版 ffmpeg（优化路径查找）
       - name: 下载并解压 ffmpeg
         run: |
           # 创建 ffmpeg 临时目录
           mkdir -p ffmpeg_temp
-          # 下载 Windows 版 ffmpeg（精简版，仅含 exe）
+          # 下载 Windows 版 ffmpeg 精简版
           curl -L -o ffmpeg_temp/ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-          # 解压并提取 ffmpeg.exe
-          powershell -Command "Expand-Archive -Path ffmpeg_temp/ffmpeg.zip -DestinationPath ffmpeg_temp -Force"
-          # 查找 ffmpeg.exe 并复制到打包目录
-          $ffmpeg_path = Get-ChildItem -Path ffmpeg_temp -Name ffmpeg.exe -Recurse | Select-Object -First 1
-          if ($ffmpeg_path) {
-              copy "ffmpeg_temp\$ffmpeg_path" dist\package\ffmpeg.exe
-              echo "✅ ffmpeg.exe 已找到并复制"
-          } else {
-              echo "❌ 未找到 ffmpeg.exe"
-              exit 1
-          }
+          # 解压并提取 ffmpeg.exe（优化路径查找）
+          powershell -Command "Expand-Archive -Path ffmpeg_temp/ffmpeg.zip -DestinationPath ffmpeg_temp -Force; `
+          $ffmpeg_path = Get-ChildItem -Path ffmpeg_temp -Filter ffmpeg.exe -Recurse | Select-Object -First 1; `
+          if ($ffmpeg_path) { `
+              Copy-Item -Path $ffmpeg_path.FullName -Destination dist\package\ffmpeg.exe -Force; `
+              Write-Host '✅ ffmpeg.exe 已复制到打包目录'; `
+          } else { `
+              Write-Error '❌ 未找到 ffmpeg.exe'; `
+              exit 1; `
+          }"
       
-      # 6. 整理产物（包含 ffmpeg.exe + 配置模板 + 使用说明）
+      # 7. 整理产物（包含 ffmpeg.exe + 配置模板 + 使用说明）
       - name: 整理产物
         run: |
-          # 创建输出目录
-          mkdir -p dist/package
-          # 复制 EXE
+          # 复制 EXE 到打包目录
           copy dist\ml0987下载器.exe dist\package\
           # 复制依赖说明、README
           copy requirements.txt dist\package\
           if exist README.md copy README.md dist\package\
-          # 创建 config.json 模板（避免运行时缺失）
+          # 创建 config.json 模板
           echo {
           echo   "output_dir": "downloads",
           echo   "ffmpeg_path": "",
@@ -92,13 +95,14 @@ jobs:
           echo "2. 下载的视频默认保存在同目录的 downloads 文件夹" >> dist\package\使用说明.txt
           echo "3. 如需代理，在「设置」Tab 配置 SOCKS5 代理信息" >> dist\package\使用说明.txt
           echo "4. 批量爬取支持页码范围，单视频下载直接输入 URL 即可" >> dist\package\使用说明.txt
+        shell: cmd
       
-      # 7. 压缩产物（包含 EXE + ffmpeg.exe + 配置模板）
+      # 8. 压缩产物
       - name: 压缩为 ZIP 包
         run: |
           Compress-Archive -Path dist\package\* -DestinationPath dist\ml0987下载器_${{ github.run_id }}.zip
       
-      # 8. 上传 Release
+      # 9. 上传 Release
       - name: 创建 Release 并上传产物
         uses: softprops/action-gh-release@v2
         with:
