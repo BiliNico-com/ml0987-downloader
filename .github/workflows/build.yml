@@ -2,14 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches:
-      - main
-      - master
-  pull_request:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
+    branches: [main]  # 推送到 main 分支时触发
 
 jobs:
   build:
@@ -18,6 +11,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史记录，以便创建标签
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,18 +29,23 @@ jobs:
         run: |
           pyinstaller --onefile --windowed --name "ml0987" app.py
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ml0987-exe
-          path: dist/ml0987.exe
+      - name: Create and push tag
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 获取最新版本号，如果没有则从 v1.0.0 开始
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          # 递增版本号
+          NEW_VERSION=$(echo $VERSION | awk -F. '{print $1"."$2"."$3+1}')
+          # 创建并推送标签
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "$NEW_VERSION"
 
       - name: Create Release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: dist/ml0987.exe
-          draft: false
-          prerelease: false
+          files: dist/ml0997.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
