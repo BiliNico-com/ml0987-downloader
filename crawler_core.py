@@ -152,7 +152,7 @@ class M3U8Parser:
 # ==================== TS 下载器 ====================
 
 class TSDownloader:
-    """TS 切片下载器"""
+    """TS 切片下载器 - 优化版（动态线程池 + 内存优化）"""
     
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path, 
                  headers: dict = None, threads: int = None, key_url: str = None,
@@ -161,10 +161,11 @@ class TSDownloader:
         self.output_file = output_file
         self.headers = headers or {}
         # 动态线程数：基于 CPU 核心数，最多 32
-        import os
         self.threads = threads or min(32, (os.cpu_count() or 1) + 4)
         self.key_url = key_url
         self.progress_callback = progress_callback
+        # AES 密钥缓存，避免重复请求
+        self._key_cache: Optional[bytes] = None
     
     def download(self) -> bool:
         """并发下载并合并"""
@@ -180,6 +181,8 @@ class TSDownloader:
                     }
                     
                     results = [None] * len(self.segments)
+                    completed_count = 0
+                    
                     for future in as_completed(future_to_index):
                         idx = future_to_index[future]
                         try:
@@ -187,10 +190,11 @@ class TSDownloader:
                         except Exception as e:
                             logger.error(f"切片 {idx+1} 失败: {e}")
                         
-                        completed = sum(1 for r in results if r is not None)
+                        completed_count += 1
                         if self.progress_callback:
-                            self.progress_callback(completed, len(self.segments))
+                            self.progress_callback(completed_count, len(self.segments))
                     
+                    # 按顺序写入文件
                     for data in results:
                         if data:
                             f.write(data)
@@ -214,9 +218,15 @@ class TSDownloader:
         
         if self.key_url and iv and AES:
             try:
-                key = bytes.fromhex(get_content(self.key_url) or "")
-                cipher = AES.new(key, AES.MODE_CBC, iv)
-                data = cipher.decrypt(data)
+                # 使用缓存的密钥，避免重复请求
+                if self._key_cache is None:
+                    key_hex = get_content(self.key_url)
+                    if key_hex:
+                        self._key_cache = bytes.fromhex(key_hex)
+                
+                if self._key_cache:
+                    cipher = AES.new(self._key_cache, AES.MODE_CBC, iv)
+                    data = cipher.decrypt(data)
             except Exception as e:
                 logger.error(f"解密失败: {e}")
         
@@ -224,18 +234,27 @@ class TSDownloader:
     
     def _convert_to_mp4(self, ts_file: Path) -> bool:
         """用 ffmpeg 转换为 MP4"""
+        import sys as _sys
+        
+        # 检测是否在 PyInstaller 打包环境中运行
+        if getattr(_sys, 'frozen', False):
+            exe_dir = Path(_sys.executable).parent
+            ffmpeg_bin = exe_dir / "ffmpeg.exe"
+        else:
+            ffmpeg_bin = "ffmpeg"
+        
         try:
             subprocess.run(
-                ["ffmpeg", "-version"],
+                [str(ffmpeg_bin), "-version"],
                 capture_output=True,
                 check=True
             )
-        except:
-            logger.error("ffmpeg 未安装")
+        except Exception:
+            logger.error("ffmpeg 未安装或不在 PATH 中")
             return False
         
         cmd = [
-            "ffmpeg", "-y",
+            str(ffmpeg_bin), "-y",
             "-i", str(ts_file),
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
@@ -418,7 +437,6 @@ class CrawlerCore:
             parser.segments,
             mp4_file,
             headers={},
-            threads=15,
             key_url=parser.key_url,
             progress_callback=lambda c, t: self._progress(c, t)
         )

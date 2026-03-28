@@ -9,13 +9,14 @@ import os
 import sys
 import json
 import logging
+import logging.handlers
 import threading
 import subprocess
-import queue
 import time
 from pathlib import Path
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 try:
     import tkinter as tk
@@ -53,12 +54,32 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        # 使用轮转日志，自动管理文件大小
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=3,
+            encoding="utf-8"
+        ),
         logging.StreamHandler()
     ]
 )
 
 logger = logging.getLogger(__name__)
+
+# ==================== 工具函数 ====================
+
+def get_app_dir() -> Path:
+    """获取程序所在目录（兼容 PyInstaller 打包）"""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return APP_DIR
+
+
+def get_ffmpeg_path() -> Path:
+    """获取 ffmpeg.exe 路径"""
+    return get_app_dir() / "ffmpeg.exe"
+
 
 # ==================== 配置读写 ====================
 
@@ -118,11 +139,11 @@ class App:
         self.tab_settings = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
         
-        self.notebook.add(self.tab_env, text="  ✅ 环境检测  ")
-        self.notebook.add(self.tab_crawl, text="  📋 批量爬取  ")
-        self.notebook.add(self.tab_single, text="  🔗 单视频  ")
-        self.notebook.add(self.tab_settings, text="  ⚙️ 设置  ")
-        self.notebook.add(self.tab_log, text="  📄 日志  ")
+        self.notebook.add(self.tab_env, text="  环境检测  ")
+        self.notebook.add(self.tab_crawl, text="  批量爬取  ")
+        self.notebook.add(self.tab_single, text="  单视频  ")
+        self.notebook.add(self.tab_settings, text="  设置  ")
+        self.notebook.add(self.tab_log, text="  日志  ")
         
         # 构建各 Tab
         self._build_tab_env()
@@ -146,9 +167,9 @@ class App:
         btn_frame = ttk.Frame(self.tab_env)
         btn_frame.pack(fill="x", padx=20, pady=10)
         
-        ttk.Button(btn_frame, text="🔍 重新检查", command=self._check_environment).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="📦 安装 Python 依赖", command=self._install_deps).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="🌐 下载 ffmpeg", command=self._download_ffmpeg).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="重新检查", command=self._check_environment).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="安装 Python 依赖", command=self._install_deps).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="下载 ffmpeg", command=self._download_ffmpeg).pack(side="left", padx=5)
     
     def _build_tab_crawl(self):
         """批量爬取 Tab"""
@@ -179,8 +200,8 @@ class App:
         # 按钮
         btn_frame = ttk.Frame(self.tab_crawl)
         btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="🚀 开始爬取", command=self._start_crawl).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="🛑 停止", command=self._stop_crawl).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="开始爬取", command=self._start_crawl).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="停止", command=self._stop_crawl).pack(side="left", padx=5)
         
         # 进度显示
         progress_frame = ttk.LabelFrame(self.tab_crawl, text="进度", padding=10)
@@ -211,8 +232,8 @@ class App:
         # 按钮
         btn_frame = ttk.Frame(self.tab_single)
         btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="🚀 开始下载", command=self._start_single).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="🛑 停止", command=self._stop_crawl).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="开始下载", command=self._start_single).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="停止", command=self._stop_crawl).pack(side="left", padx=5)
         
         # 进度显示
         progress_frame = ttk.LabelFrame(self.tab_single, text="进度", padding=10)
@@ -274,7 +295,7 @@ class App:
         # 保存按钮
         btn_frame = ttk.Frame(self.tab_settings)
         btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="💾 保存设置", command=self._save_settings).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="保存设置", command=self._save_settings).pack(side="left", padx=5)
     
     def _build_tab_log(self):
         """日志 Tab"""
@@ -288,28 +309,19 @@ class App:
         
         btn_frame = ttk.Frame(self.tab_log)
         btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="🗑️ 清空日志", command=self._clear_log).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="清空日志", command=self._clear_log).pack(side="left", padx=5)
     
     # ==================== 功能方法 ====================
     
     def _check_environment(self):
-        """检查运行环境 - 仅检查本地文件"""
-        import sys
-        
+        """检查运行环境"""
         self.env_status_text.delete(1.0, tk.END)
 
-        # 检测是否在 PyInstaller 打包环境中运行
-        if getattr(sys, 'frozen', False):
-            # PyInstaller 打包后的可执行文件路径
-            exe_path = Path(sys.executable).parent
-            ffmpeg_path = exe_path / "ffmpeg.exe"
-        else:
-            # 普通 Python 运行环境
-            ffmpeg_path = APP_DIR / "ffmpeg.exe"
-        
+        # 检测 ffmpeg.exe
+        ffmpeg_path = get_ffmpeg_path()
         ffmpeg_found = ffmpeg_path.exists()
 
-        self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
+        self._append_status(f"ffmpeg:", "OK" if ffmpeg_found else "FAIL")
         if not ffmpeg_found:
             self._append_status(f"  请将 ffmpeg.exe 放置于: {ffmpeg_path.parent}", "WARN")
         else:
@@ -318,81 +330,20 @@ class App:
         return ffmpeg_found
 
     def check_ffmpeg(self):
-        """检查 ffmpeg.exe 是否存在，缺失时自动下载"""
-        import sys
-        import urllib.request
-        import zipfile
-        
-        # 检测是否在 PyInstaller 打包环境中运行
-        if getattr(sys, 'frozen', False):
-            # PyInstaller 打包后的可执行文件路径
-            exe_path = Path(sys.executable).parent
-            ffmpeg_path = exe_path / "ffmpeg.exe"
-        else:
-            # 普通 Python 运行环境
-            ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
+        ffmpeg_path = get_ffmpeg_path()
         
         if not ffmpeg_path.exists():
             result = messagebox.askyesno(
                 "缺少 ffmpeg.exe",
                 f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
                 f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
-                f"选择“是”自动下载，或“否”跳转到官网下载"
+                f"请将 ffmpeg.exe 放置于: {ffmpeg_path.parent}\n\n"
+                f"是否跳转到 ffmpeg 官网下载？"
             )
             if result:
-                try:
-                    # 显示下载进度
-                    progress_window = tk.Toplevel(self.root)
-                    progress_window.title("下载 ffmpeg")
-                    progress_window.geometry("300x100")
-                    
-                    progress_label = ttk.Label(progress_window, text="正在下载 ffmpeg...")
-                    progress_label.pack(pady=20)
-                    
-                    progress_bar = ttk.Progressbar(progress_window, length=200, mode="indeterminate")
-                    progress_bar.pack(pady=10)
-                    progress_bar.start(10)
-                    
-                    progress_window.update()
-                    
-                    # FFmpeg Windows 64位下载地址
-                    ffmpeg_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-                    ffmpeg_zip_path = ffmpeg_path.parent / "ffmpeg.zip"
-                    
-                    # 下载文件
-                    urllib.request.urlretrieve(ffmpeg_url, ffmpeg_zip_path)
-                    
-                    progress_label.config(text="正在解压...")
-                    progress_window.update()
-                    
-                    # 解压文件
-                    with zipfile.ZipFile(ffmpeg_zip_path, 'r') as zip_ref:
-                        # 找到 ffmpeg.exe 并提取
-                        for file_info in zip_ref.infolist():
-                            if file_info.filename.endswith('ffmpeg.exe'):
-                                zip_ref.extract(file_info, ffmpeg_path.parent)
-                                # 移动到正确的位置
-                                extracted_path = ffmpeg_path.parent / file_info.filename
-                                extracted_path.rename(ffmpeg_path)
-                                break
-                    
-                    # 删除压缩包
-                    ffmpeg_zip_path.unlink()
-                    
-                    progress_window.destroy()
-                    messagebox.showinfo("下载完成", f"ffmpeg.exe 已成功下载到:\n{ffmpeg_path}")
-                    
-                except Exception as e:
-                    progress_window.destroy()
-                    messagebox.showerror("下载失败", f"自动下载失败: {e}\n\n请手动下载 ffmpeg.exe")
-                    # 回退到官网下载
-                    import webbrowser
-                    webbrowser.open("https://ffmpeg.org/download.html")
-            else:
-                # 跳转到官网下载
                 import webbrowser
                 webbrowser.open("https://ffmpeg.org/download.html")
-        
         return ffmpeg_path.exists()
 
     def _append_status(self, text, status):
@@ -410,20 +361,20 @@ class App:
         
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(APP_DIR / "requirements.txt")],
+                [sys.executable, "-m", "pip", "install", "-r", str(get_app_dir() / "requirements.txt")],
                 capture_output=True,
                 text=True
             )
             
             self.env_status_text.insert(tk.END, result.stdout)
             if result.returncode == 0:
-                self.env_status_text.insert(tk.END, "\n✓ 依赖安装成功\n")
+                self.env_status_text.insert(tk.END, "\n依赖安装成功\n")
             else:
-                self.env_status_text.insert(tk.END, f"\n✗ 安装失败: {result.stderr}\n")
+                self.env_status_text.insert(tk.END, f"\n安装失败: {result.stderr}\n")
             
             self._check_environment()
         except Exception as e:
-            self.env_status_text.insert(tk.END, f"\n✗ 安装失败: {e}\n")
+            self.env_status_text.insert(tk.END, f"\n安装失败: {e}\n")
     
     def _download_ffmpeg(self):
         """下载 ffmpeg"""
@@ -459,7 +410,13 @@ class App:
         logger.info(text)
     
     def _status_to_ui(self, text_widget, text):
-        """记录状态到指定文本框"""
+        """记录状态到指定文本框（修复：确保参数顺序正确）"""
+        # 参数说明：
+        # text_widget: ScrolledText 控件对象
+        # text: 要显示的文本字符串
+        if text_widget is None:
+            logger.warning("text_widget 为 None，跳过 UI 更新")
+            return
         text_widget.insert(tk.END, f"{text}\n")
         text_widget.see(tk.END)
     
@@ -483,9 +440,9 @@ class App:
                     page_start=self.page_start_var.get(),
                     page_end=self.page_end_var.get()
                 )
-                self._status_to_ui(self.crawl_status_text, "\n✓ 批量爬取完成")
+                self._status_to_ui(self.crawl_status_text, "\n批量爬取完成")
             except Exception as e:
-                self._status_to_ui(self.crawl_status_text, f"\n✗ 错误: {e}")
+                self._status_to_ui(self.crawl_status_text, f"\n错误: {e}")
                 logger.exception("批量爬取失败")
         
         self.crawl_thread = threading.Thread(target=run)
@@ -516,9 +473,9 @@ class App:
         def run():
             try:
                 self.crawler.download_single(url, title)
-                self._status_to_ui(self.single_status_text, "\n✓ 下载完成")
+                self._status_to_ui(self.single_status_text, "\n下载完成")
             except Exception as e:
-                self._status_to_ui(self.single_status_text, f"\n✗ 错误: {e}")
+                self._status_to_ui(self.single_status_text, f"\n错误: {e}")
                 logger.exception("单个下载失败")
         
         self.crawl_thread = threading.Thread(target=run)
