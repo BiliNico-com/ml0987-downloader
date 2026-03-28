@@ -103,7 +103,7 @@ class App:
         self._check_environment()
 
         # 检查 ffmpeg.exe
-        self.check_ffmpeg()
+        self._check_ffmpeg()
     
     def _create_widgets(self):
         """创建界面组件"""
@@ -248,6 +248,10 @@ class App:
         # 代理设置
         proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理", padding=10)
         proxy_frame.pack(fill="x", padx=20, pady=10)
+        
+        # 代理启用复选框
+        self.proxy_enabled_var = tk.BooleanVar(value=self.config.get("proxy_enabled", False))
+        ttk.Checkbutton(proxy_frame, text="启用代理", variable=self.proxy_enabled_var).pack(anchor="w", padx=5, pady=5)
         
         ttk.Label(proxy_frame, text="主机:").pack(anchor="w", padx=5)
         self.proxy_host_var = tk.StringVar(value=self.config["proxy_host"])
