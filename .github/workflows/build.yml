@@ -1,82 +1,55 @@
-# .github/workflows/build.yml
-name: 自动编译 ml0987 视频下载器
+# 找到 _check_environment 方法，替换为以下代码
+def _check_environment(self):
+    """检查运行环境 - 支持自动识别同目录 ffmpeg.exe"""
+    self.env_status_text.delete(1.0, tk.END)
 
-# 触发条件：push 到 main 分支 / 手动触发
-on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'app.py'
-      - 'crawler_core.py'
-      - 'requirements.txt'
-      - '.github/workflows/build.yml'
-  workflow_dispatch:  # 允许手动触发
+    # 优先检查 EXE 同目录（打包后 EXE 所在目录）
+    if getattr(sys, 'frozen', False):
+        # 打包后的运行目录
+        app_path = Path(sys.executable).parent
+    else:
+        # 开发环境目录
+        app_path = APP_DIR
 
-# 工作流权限
-permissions:
-  contents: write  # 允许上传 Release 产物
+    # 检查 ffmpeg.exe
+    ffmpeg_paths = [
+        app_path / "ffmpeg.exe",
+        APP_DIR / "ffmpeg.exe",
+        Path(self.config.get("ffmpeg_path", ""))
+    ]
+    ffmpeg_found = False
+    ffmpeg_actual_path = ""
+    for path in ffmpeg_paths:
+        if path.exists() and path.is_file():
+            ffmpeg_found = True
+            ffmpeg_actual_path = str(path)
+            break
 
-jobs:
-  build-windows:
-    runs-on: windows-latest  # 使用 Windows 构建环境（适配 ffmpeg.exe/浏览器驱动）
+    self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
+    if not ffmpeg_found:
+        self._append_status(f"  请将 ffmpeg.exe 放置于: {app_path}", "WARN")
+    else:
+        self._append_status(f"  路径: {ffmpeg_actual_path}", "OK")
+
+    return ffmpeg_found
+
+# 同时修改 check_ffmpeg 方法（如果用户删除了 ffmpeg.exe 时提示）
+def check_ffmpeg(self):
+    """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
+    if getattr(sys, 'frozen', False):
+        app_path = Path(sys.executable).parent
+    else:
+        app_path = APP_DIR
     
-    steps:
-      # 1. 检出代码
-      - name: 检出仓库代码
-        uses: actions/checkout@v4
-      
-      # 2. 设置 Python 环境
-      - name: 配置 Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'  # 选择稳定版本，适配 tkinter/selenium
-          cache: 'pip'  # 缓存依赖，加速构建
-      
-      # 3. 安装依赖
-      - name: 安装 Python 依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller  # 用于打包成 exe
-      
-      # 4. 打包可执行文件（PyInstaller）
-      - name: 打包为单个 EXE
-        run: |
-          pyinstaller --onefile --windowed --name "ml0987下载器" ^
-          --add-data "config.json;." ^  # 包含配置文件（如果需要）
-          --icon=none ^  # 无图标，如需自定义可替换为 icon.ico
-          app.py
-        shell: cmd
-      
-      # 5. 准备打包产物（源码 + EXE）
-      - name: 整理产物
-        run: |
-          # 创建输出目录
-          mkdir -p dist/package
-          # 复制 EXE 到打包目录
-          copy dist\ml0987下载器.exe dist\package\
-          # 复制依赖说明、README 等
-          copy requirements.txt dist\package\
-          copy README.md dist\package\
-          # 提示文档（告知用户需自行下载 ffmpeg.exe）
-          echo "使用说明：1. 将 ffmpeg.exe 放入同目录；2. 运行 ml0987下载器.exe" > dist\package\使用说明.txt
-      
-      # 6. 压缩产物
-      - name: 压缩为 ZIP 包
-        run: |
-          Compress-Archive -Path dist\package\* -DestinationPath dist\ml0987下载器_${{ github.run_id }}.zip
-      
-      # 7. 上传为 GitHub Release 产物
-      - name: 创建 Release 并上传产物
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_id }}  # 用运行 ID 作为版本号
-          name: 自动构建_${{ github.run_id }}
-          body: |
-            📦 自动编译的 ml0987 视频下载器
-            - 构建时间：${{ github.run_at }}
-            - 注意：需自行下载 ffmpeg.exe 放入同目录运行
-          files: |
-            dist\ml0987下载器_${{ github.run_id }}.zip
-          draft: false
-          prerelease: false
+    ffmpeg_path = app_path / "ffmpeg.exe"
+    if not ffmpeg_path.exists():
+        result = messagebox.askyesno(
+            "缺少 ffmpeg.exe",
+            f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
+            f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
+            f"是否跳转到 ffmpeg 官网下载？"
+        )
+        if result:
+            import webbrowser
+            webbrowser.open("https://ffmpeg.org/download.html")
+    return ffmpeg_path.exists()
