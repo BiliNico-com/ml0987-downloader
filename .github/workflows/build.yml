@@ -2,22 +2,32 @@ name: Build and Release
 
 on:
   push:
-    branches: [main]  # 推送到 main 分支时触发
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 获取完整历史记录，以便创建标签
+          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
@@ -25,27 +35,32 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Get version from tags
+        id: version
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
       - name: Build with PyInstaller
         run: |
           pyinstaller --onefile --windowed --name "ml0987" app.py
 
-      - name: Create and push tag
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # 获取最新版本号，如果没有则从 v1.0.0 开始
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          # 递增版本号
-          NEW_VERSION=$(echo $VERSION | awk -F. '{print $1"."$2"."$3+1}')
-          # 创建并推送标签
-          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
-          git push origin "$NEW_VERSION"
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml0987-exe-${{ steps.version.outputs.version }}
+          path: dist/ml0987.exe
+          retention-days: 90
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          files: dist/ml0997.exe
+          files: dist/ml0987.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```<｜end▁of▁thinking｜>
