@@ -294,33 +294,105 @@ class App:
     
     def _check_environment(self):
         """检查运行环境 - 仅检查本地文件"""
+        import sys
+        
         self.env_status_text.delete(1.0, tk.END)
 
-        # 仅检查 ffmpeg.exe 是否存在于 APP_DIR 目录下
-        ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        # 检测是否在 PyInstaller 打包环境中运行
+        if getattr(sys, 'frozen', False):
+            # PyInstaller 打包后的可执行文件路径
+            exe_path = Path(sys.executable).parent
+            ffmpeg_path = exe_path / "ffmpeg.exe"
+        else:
+            # 普通 Python 运行环境
+            ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        
         ffmpeg_found = ffmpeg_path.exists()
 
         self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
         if not ffmpeg_found:
-            self._append_status(f"  请将 ffmpeg.exe 放置于: {APP_DIR}", "WARN")
+            self._append_status(f"  请将 ffmpeg.exe 放置于: {ffmpeg_path.parent}", "WARN")
         else:
             self._append_status(f"  路径: {ffmpeg_path}", "OK")
 
         return ffmpeg_found
 
     def check_ffmpeg(self):
-        """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
-        ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        """检查 ffmpeg.exe 是否存在，缺失时自动下载"""
+        import sys
+        import urllib.request
+        import zipfile
+        
+        # 检测是否在 PyInstaller 打包环境中运行
+        if getattr(sys, 'frozen', False):
+            # PyInstaller 打包后的可执行文件路径
+            exe_path = Path(sys.executable).parent
+            ffmpeg_path = exe_path / "ffmpeg.exe"
+        else:
+            # 普通 Python 运行环境
+            ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        
         if not ffmpeg_path.exists():
             result = messagebox.askyesno(
                 "缺少 ffmpeg.exe",
                 f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
                 f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
-                f"是否跳转到 ffmpeg 官网下载？"
+                f"选择“是”自动下载，或“否”跳转到官网下载"
             )
             if result:
+                try:
+                    # 显示下载进度
+                    progress_window = tk.Toplevel(self.root)
+                    progress_window.title("下载 ffmpeg")
+                    progress_window.geometry("300x100")
+                    
+                    progress_label = ttk.Label(progress_window, text="正在下载 ffmpeg...")
+                    progress_label.pack(pady=20)
+                    
+                    progress_bar = ttk.Progressbar(progress_window, length=200, mode="indeterminate")
+                    progress_bar.pack(pady=10)
+                    progress_bar.start(10)
+                    
+                    progress_window.update()
+                    
+                    # FFmpeg Windows 64位下载地址
+                    ffmpeg_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+                    ffmpeg_zip_path = ffmpeg_path.parent / "ffmpeg.zip"
+                    
+                    # 下载文件
+                    urllib.request.urlretrieve(ffmpeg_url, ffmpeg_zip_path)
+                    
+                    progress_label.config(text="正在解压...")
+                    progress_window.update()
+                    
+                    # 解压文件
+                    with zipfile.ZipFile(ffmpeg_zip_path, 'r') as zip_ref:
+                        # 找到 ffmpeg.exe 并提取
+                        for file_info in zip_ref.infolist():
+                            if file_info.filename.endswith('ffmpeg.exe'):
+                                zip_ref.extract(file_info, ffmpeg_path.parent)
+                                # 移动到正确的位置
+                                extracted_path = ffmpeg_path.parent / file_info.filename
+                                extracted_path.rename(ffmpeg_path)
+                                break
+                    
+                    # 删除压缩包
+                    ffmpeg_zip_path.unlink()
+                    
+                    progress_window.destroy()
+                    messagebox.showinfo("下载完成", f"ffmpeg.exe 已成功下载到:\n{ffmpeg_path}")
+                    
+                except Exception as e:
+                    progress_window.destroy()
+                    messagebox.showerror("下载失败", f"自动下载失败: {e}\n\n请手动下载 ffmpeg.exe")
+                    # 回退到官网下载
+                    import webbrowser
+                    webbrowser.open("https://ffmpeg.org/download.html")
+            else:
+                # 跳转到官网下载
                 import webbrowser
                 webbrowser.open("https://ffmpeg.org/download.html")
+        
         return ffmpeg_path.exists()
 
     def _append_status(self, text, status):
@@ -409,8 +481,7 @@ class App:
             try:
                 self.crawler.crawl_batch(
                     page_start=self.page_start_var.get(),
-                    page_end=self.page_end_var.get(),
-                    list_type=self.list_type_var.get()
+                    page_end=self.page_end_var.get()
                 )
                 self._status_to_ui(self.crawl_status_text, "\n✓ 批量爬取完成")
             except Exception as e:

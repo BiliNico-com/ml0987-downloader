@@ -155,12 +155,14 @@ class TSDownloader:
     """TS 切片下载器"""
     
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path, 
-                 headers: dict = None, threads: int = 15, key_url: str = None,
+                 headers: dict = None, threads: int = None, key_url: str = None,
                  progress_callback=None):
         self.segments = segments
         self.output_file = output_file
         self.headers = headers or {}
-        self.threads = threads
+        # 动态线程数：基于 CPU 核心数，最多 32
+        import os
+        self.threads = threads or min(32, (os.cpu_count() or 1) + 4)
         self.key_url = key_url
         self.progress_callback = progress_callback
     
