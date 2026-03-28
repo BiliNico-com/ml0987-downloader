@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "proxy_user": "",
     "proxy_pass": "",
     "headless": True,
+    "browser": "edge",
     "list_type": "list",
     "page_start": 1,
     "page_end": 3,
@@ -264,7 +265,7 @@ class App:
         browser_frame.pack(fill="x", padx=20, pady=10)
         
         ttk.Label(browser_frame, text="选择浏览器:").pack(anchor="w", padx=5)
-        self.browser_var = tk.StringVar(value=self.config.get("browser", "chrome"))
+        self.browser_var = tk.StringVar(value=self.config.get("browser", "edge"))
         ttk.Combobox(browser_frame, textvariable=self.browser_var, 
                     values=["chrome", "edge"], width=10, state="readonly").pack(anchor="w", padx=5, pady=5)
         

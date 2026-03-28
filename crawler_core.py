@@ -22,12 +22,20 @@ from typing import Optional, List, Dict, Tuple
 
 try:
     from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.edge.service import Service as EdgeService
-    from selenium.webdriver.edge.options import Options as EdgeOptions
 except ImportError:
     webdriver = None
+
+# 兼容 Selenium 3.x / 4.x 的 import 路径差异
+_Options = None
+_EdgeOptions = None
+try:
+    from selenium.webdriver.chrome.options import Options as _Options
+except ImportError:
+    pass
+try:
+    from selenium.webdriver.edge.options import Options as _EdgeOptions
+except ImportError:
+    pass
 
 try:
     from Crypto.Cipher import AES
@@ -328,15 +336,18 @@ class CrawlerCore:
     def _create_driver(self):
         """创建浏览器驱动"""
         if not webdriver:
-            raise ImportError("selenium 未安装")
+            raise ImportError("selenium 未安装，请运行: pip install selenium")
         
         browser = self.config.get("browser", "chrome").lower()
         
         if browser == "edge":
-            from selenium.webdriver.edge.options import Options as EdgeOptions
-            options = EdgeOptions()
+            if not _EdgeOptions:
+                raise ImportError("当前 selenium 版本不支持 Edge，请升级: pip install selenium --upgrade")
+            options = _EdgeOptions()
         else:
-            options = Options()
+            if not _Options:
+                raise ImportError("当前 selenium 版本不支持 Chrome，请升级: pip install selenium --upgrade")
+            options = _Options()
         
         # 无头模式
         if self.config.get("headless", True):
