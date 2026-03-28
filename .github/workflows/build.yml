@@ -19,13 +19,12 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.11'
 
     - name: Install dependencies
       run: |
-        cd crawler
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install -r crawler/requirements.txt
         pip install pyinstaller
 
     - name: Download FFmpeg
@@ -38,10 +37,10 @@ jobs:
         del ffmpeg.zip
 
     - name: Build with PyInstaller
-      working-directory: ./crawler
       run: |
+        cd crawler
         pyinstaller --onefile --windowed ^
-          --name "ml0987下载器" ^
+          --name "app" ^
           --add-data "crawler_core.py;." ^
           --add-data "ffmpeg.exe;." ^
           --add-data "ffprobe.exe;." ^
@@ -63,23 +62,22 @@ jobs:
           app.py
 
     - name: Verify build output
-      working-directory: ./crawler
       run: |
-        if exist "dist\ml0987下载器.exe" (
-          echo ✓ Build successful
+        if exist "crawler\dist\app.exe" (
+          echo Build successful
         ) else (
-          echo ✗ Build failed
+          echo Build failed
           exit 1
         )
 
     - name: Create release package
-      working-directory: ./crawler/dist
       run: |
-        7z a ml0987下载器-windows.zip ml0987下载器.exe
+        cd crawler\dist
+        7z a ml0987下载器-windows.zip app.exe
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: ml0987下载器-windows
-        path: ./crawler/dist/ml0987下载器-windows.zip
+        path: crawler/dist/ml0987下载器-windows.zip
         retention-days: 30
