@@ -1,0 +1,25 @@
+name: Build Windows Executable
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    - run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+    - run: |
+        pyinstaller --noconfirm --onedir --windowed --name "ml0987下载器" --add-data "crawler_core.py;." --hidden-import selenium --hidden-import webdriver_manager --hidden-import bs4 --hidden-import lxml --hidden-import requests --hidden-import socks --hidden-import pycryptodome --hidden-import Crypto --hidden-import Crypto.Cipher --hidden-import Crypto.Util --hidden-import tkinter --hidden-import tkinter.ttk --hidden-import tkinter.scrolledtext --hidden-import tkinter.filedialog --hidden-import tkinter.messagebox --collect-all selenium --collect-all webdriver_manager app.py
+      working-directory: .
+    - run: Compress-Archive -Path dist\ml0987下载器 -DestinationPath ml0987下载器.zip
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ml0987下载器-windows
+        path: ml0987下载器.zip
