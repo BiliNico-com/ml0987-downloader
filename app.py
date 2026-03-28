@@ -135,6 +135,7 @@ class App:
 
         # 封面图片缓存
         self._cover_photo = None  # 保持引用防止 GC
+        self._search_cover_photo = None  # 搜索 Tab 封面缓存
 
         # 批量爬取统计
         self._batch_total_videos = 0
@@ -152,14 +153,16 @@ class App:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Tab 页顺序：批量爬取 → 单视频 → 设置 → 日志 → 环境检测（隐藏）
+        # Tab 页顺序：批量爬取 → 搜索 → 单视频 → 设置 → 日志 → 环境检测（隐藏）
         self.tab_crawl = ttk.Frame(self.notebook)
+        self.tab_search = ttk.Frame(self.notebook)
         self.tab_single = ttk.Frame(self.notebook)
         self.tab_settings = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
         self.tab_env = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_crawl, text="  批量爬取  ")
+        self.notebook.add(self.tab_search, text="  搜索  ")
         self.notebook.add(self.tab_single, text="  单视频  ")
         self.notebook.add(self.tab_settings, text="  设置  ")
         self.notebook.add(self.tab_log, text="  日志  ")
@@ -168,6 +171,7 @@ class App:
 
         # 构建各 Tab
         self._build_tab_crawl()
+        self._build_tab_search()
         self._build_tab_single()
         self._build_tab_settings()
         self._build_tab_log()
@@ -252,6 +256,84 @@ class App:
         self.crawl_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
         self.crawl_status_text.pack(fill="both", expand=True, pady=(5, 0))
+
+    # ==================== 搜索 Tab ====================
+
+    def _build_tab_search(self):
+        """搜索 Tab"""
+        # 控制面板
+        control_frame = ttk.LabelFrame(self.tab_search, text="搜索设置", padding=10)
+        control_frame.pack(fill="x", padx=20, pady=(10, 5))
+
+        # 第一行：域名 + 搜索关键词
+        row1 = ttk.Frame(control_frame)
+        row1.pack(fill="x", pady=3)
+        ttk.Label(row1, text="站点:").pack(side="left")
+        self.search_site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        site_combo = ttk.Combobox(row1, textvariable=self.search_site_var,
+                                  values=["https://ml0987.xyz", "https://hsex.icu", "https://hsex.men", "https://hsex.tv"],
+                                  width=16, state="readonly")
+        site_combo.pack(side="left", padx=(5, 20))
+        ttk.Label(row1, text="关键词:").pack(side="left")
+        self.search_keyword_var = tk.StringVar()
+        ttk.Entry(row1, textvariable=self.search_keyword_var, width=25).pack(side="left", padx=5)
+
+        # 第二行：排序 + 页码 + 按钮
+        row2 = ttk.Frame(control_frame)
+        row2.pack(fill="x", pady=3)
+        ttk.Label(row2, text="排序:").pack(side="left")
+        self.search_sort_var = tk.StringVar(value="最新")
+        sort_combo = ttk.Combobox(row2, textvariable=self.search_sort_var,
+                                  values=["最新", "最热"], width=8, state="readonly")
+        sort_combo.pack(side="left", padx=(5, 20))
+        ttk.Label(row2, text="页码:").pack(side="left")
+        self.search_page_start_var = tk.IntVar(value=1)
+        ttk.Spinbox(row2, from_=1, to=100, textvariable=self.search_page_start_var, width=5).pack(side="left", padx=2)
+        ttk.Label(row2, text="~").pack(side="left")
+        self.search_page_end_var = tk.IntVar(value=3)
+        ttk.Spinbox(row2, from_=1, to=100, textvariable=self.search_page_end_var, width=5).pack(side="left", padx=(2, 15))
+
+        ttk.Button(row2, text="▶ 搜索并下载", command=self._start_search).pack(side="left", padx=3)
+        ttk.Button(row2, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
+
+        # 下方区域：左边封面 + 右边进度
+        bottom_frame = ttk.Frame(self.tab_search)
+        bottom_frame.pack(fill="both", expand=True, padx=20, pady=(5, 10))
+
+        # 左侧：封面预览
+        cover_frame = ttk.LabelFrame(bottom_frame, text="当前视频", padding=5)
+        cover_frame.pack(side="left", fill="y", padx=(0, 10))
+        cover_frame.configure(width=220)
+        cover_frame.pack_propagate(False)
+
+        self.search_cover_label = tk.Label(cover_frame, text="等待搜索...", bg="#f0f0f0",
+                                           width=22, height=13, anchor="center",
+                                           fg="#999", font=("Arial", 10))
+        self.search_cover_label.pack(fill="both", expand=True)
+
+        self.search_preview_title_label = tk.Label(cover_frame, text="",
+                                                   wraplength=200, justify="left",
+                                                   font=("Arial", 9))
+        self.search_preview_title_label.pack(fill="x", pady=(5, 0))
+
+        # 右侧：进度
+        right_frame = ttk.LabelFrame(bottom_frame, text="下载进度", padding=5)
+        right_frame.pack(side="left", fill="both", expand=True)
+
+        self.search_overall_label = tk.Label(right_frame, text="就绪",
+                                             font=("Arial", 9), anchor="w")
+        self.search_overall_label.pack(fill="x")
+
+        self.search_progress = ttk.Progressbar(right_frame, mode="determinate")
+        self.search_progress.pack(fill="x", pady=(3, 5))
+
+        self.search_slice_label = tk.Label(right_frame, text="",
+                                           font=("Consolas", 9), anchor="w", fg="#555")
+        self.search_slice_label.pack(fill="x")
+
+        self.search_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
+                                                            font=("Consolas", 9))
+        self.search_status_text.pack(fill="both", expand=True, pady=(5, 0))
 
     # ==================== 单视频 Tab ====================
 
@@ -608,6 +690,97 @@ class App:
             except Exception:
                 pass
 
+    # ==================== 搜索下载 ====================
+
+    def _update_search_cover_preview(self, info: dict):
+        """搜索 Tab 的封面预览"""
+        cover_url = info.get("cover", "")
+        title = info.get("title", "")
+
+        try:
+            self.root.after(0, lambda: self.search_preview_title_label.config(text=title))
+        except Exception:
+            pass
+
+        if not cover_url:
+            return
+
+        img_data = download_image(cover_url)
+        if not img_data:
+            return
+
+        def show_image():
+            try:
+                if HAS_PIL:
+                    img = Image.open(io.BytesIO(img_data))
+                    img.thumbnail((200, 130), Image.LANCZOS)
+                    self._search_cover_photo = ImageTk.PhotoImage(img)
+                    self.search_cover_label.config(image=self._search_cover_photo, text="", bg="white")
+                else:
+                    self._search_cover_photo = tk.PhotoImage(data=img_data)
+                    self.search_cover_label.config(image=self._search_cover_photo, text="", bg="white")
+            except Exception:
+                self.search_cover_label.config(image="", text="封面加载失败", bg="#f0f0f0")
+
+        try:
+            self.root.after(0, show_image)
+        except Exception:
+            pass
+
+    def _start_search(self):
+        """开始搜索并下载"""
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        keyword = self.search_keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning("警告", "请输入搜索关键词")
+            return
+
+        # 排序映射
+        sort_map = {"最新": "new", "最热": "hot"}
+        sort = sort_map.get(self.search_sort_var.get(), "new")
+
+        def on_progress(current, total):
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self._update_progress(
+                self.search_progress, current, total,
+                self.search_slice_label,
+                f"切片: {pct}"
+            )
+
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._log_to_ui,
+            progress_callback=on_progress,
+            info_callback=self._update_search_cover_preview,
+            base_url=self.search_site_var.get(),
+        )
+
+        def run():
+            try:
+                self.root.after(0, lambda: self.search_overall_label.config(text="正在搜索下载..."))
+                result = self.crawler.crawl_search(
+                    keyword=keyword,
+                    page_start=self.search_page_start_var.get(),
+                    page_end=self.search_page_end_var.get(),
+                    sort=sort,
+                )
+                success = result.get("success", 0)
+                skipped = result.get("skipped", 0)
+                self.root.after(0, lambda: self.search_overall_label.config(
+                    text=f"完成 — 新下载: {success}，跳过: {skipped}"
+                ))
+                self._status_to_ui(self.search_status_text, f"── 搜索下载完成（新下载: {success}，跳过: {skipped}） ──")
+            except Exception as e:
+                self._status_to_ui(self.search_status_text, f"错误: {e}")
+                logger.exception("搜索下载失败")
+
+        self.crawl_thread = threading.Thread(target=run)
+        self.crawl_thread.daemon = True
+        self.crawl_thread.start()
+
     # ==================== 批量爬取 ====================
 
     def _start_crawl(self):
@@ -710,9 +883,11 @@ class App:
             self.crawler = None
             self._status_to_ui(self.crawl_status_text, "── 已停止 ──")
             self._status_to_ui(self.single_status_text, "── 已停止 ──")
+            self._status_to_ui(self.search_status_text, "── 已停止 ──")
             try:
                 self.root.after(0, lambda: self.crawl_overall_label.config(text="已停止"))
                 self.root.after(0, lambda: self.single_overall_label.config(text="已停止"))
+                self.root.after(0, lambda: self.search_overall_label.config(text="已停止"))
             except Exception:
                 pass
 

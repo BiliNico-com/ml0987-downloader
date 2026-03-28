@@ -694,6 +694,124 @@ class CrawlerCore:
         self._log(f"批量爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
         return {"success": total_success, "skipped": total_skipped}
 
+    # ==================== 搜索爬取 ====================
+
+    def crawl_search(self, keyword: str, page_start: int = 1, page_end: int = 1,
+                     sort: str = "new") -> dict:
+        """按关键词搜索并批量下载，返回 {success: int, skipped: int}"""
+        total_success = 0
+        total_skipped = 0
+
+        from urllib.parse import quote
+
+        self._log(f"搜索关键词: {keyword}，排序: {sort}，页码: {page_start}-{page_end}")
+        self._log(f"已下载记录: {len(self._history)} 个视频")
+
+        for page in range(page_start, page_end + 1):
+            if self._stop_flag:
+                break
+
+            self._log(f"正在搜索第 {page} 页...")
+
+            search_url = f"{self.base_url}/search.htm?search={quote(keyword)}&sort={sort}&page={page}"
+            video_list = self._extract_search_results(search_url)
+            if not video_list:
+                self._log(f"第 {page} 页未发现视频", "warn")
+                continue
+
+            self._log(f"发现 {len(video_list)} 个视频")
+
+            for idx, video in enumerate(video_list, 1):
+                if self._stop_flag:
+                    break
+
+                url = video["url"]
+                vid = video.get("id")
+                title = video.get("title") or f"搜索_第{page}页_第{idx}个"
+                cover = video.get("cover") or ""
+
+                # 防重复检查
+                if vid and self._is_downloaded(vid):
+                    self._log(f"[{idx}/{len(video_list)}] 已下载过，跳过: {title}")
+                    total_skipped += 1
+                    continue
+
+                self._log(f"[{idx}/{len(video_list)}] {title}")
+                self._log(f"  {url}")
+
+                if hasattr(self, 'info_callback') and self.info_callback and cover:
+                    try:
+                        self.info_callback({"title": title, "cover": cover})
+                    except Exception:
+                        pass
+
+                if self.download_single(url, title, video_id=vid):
+                    if vid and self._history.get(vid, {}).get("download_time"):
+                        total_success += 1
+                    else:
+                        total_skipped += 1
+
+                time.sleep(2)
+
+        self._log(f"搜索爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        return {"success": total_success, "skipped": total_skipped}
+
+    def _extract_search_results(self, search_url: str) -> List[dict]:
+        """从搜索结果页提取视频链接，返回 [{'url', 'id', 'title', 'cover'}, ...]"""
+        try:
+            resp = http_get(search_url, timeout=15)
+            if not resp or resp.status_code != 200:
+                self._log(f"获取搜索页失败: HTTP {resp.status_code if resp else '无响应'}", "error")
+                return []
+
+            videos = []
+            seen_ids = set()
+
+            # 策略1: 列表页格式（带封面图的 <a> 标签）
+            for m in re.finditer(
+                r'<a[^>]*href="(video-(\d+)\.htm)"[^>]*>\s*<div[^>]*style="[^"]*background-image:\s*url\(["\']([^"\']+)["\']\)[^"]*"\s*title=\s*"([^"]*)"',
+                resp.text
+            ):
+                href, vid, cover, title = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+                if not cover.startswith('http'):
+                    cover = f"https://img.ml0987.com{cover}"
+                if vid not in seen_ids:
+                    seen_ids.add(vid)
+                    videos.append({
+                        "url": f"{self.base_url}/{href}",
+                        "id": vid,
+                        "title": title,
+                        "cover": cover,
+                    })
+
+            # 策略2: 搜索结果格式（<h4><a href="video-xxx.htm">标题</a></h4>）
+            if not videos:
+                for m in re.finditer(r'<h4>\s*<a[^>]*href="(video-(\d+)\.htm)"[^>]*>([^<]+)</a>', resp.text):
+                    href, vid, title = m.group(1), m.group(2), m.group(3).strip()
+                    # 尝试找封面图：在同一个容器内搜索 background-image
+                    cover = ""
+                    pos = m.start()
+                    block = resp.text[max(0, pos - 500):pos]
+                    cover_m = re.search(r'background-image:\s*url\(["\']([^"\']+)["\']\)', block)
+                    if cover_m:
+                        cover = cover_m.group(1)
+                        if not cover.startswith('http'):
+                            cover = f"https://img.ml0987.com{cover}"
+                    if vid not in seen_ids:
+                        seen_ids.add(vid)
+                        videos.append({
+                            "url": f"{self.base_url}/{href}",
+                            "id": vid,
+                            "title": title,
+                            "cover": cover,
+                        })
+
+            return videos
+
+        except Exception as e:
+            self._log(f"提取搜索结果失败: {e}", "error")
+            return []
+
     def _extract_video_urls(self, list_url: str) -> List[dict]:
         """提取视频链接，返回 [{'url', 'id', 'title', 'cover'}, ...]"""
         try:
