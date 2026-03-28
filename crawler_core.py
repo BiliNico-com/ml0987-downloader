@@ -9,11 +9,12 @@ ml0987 视频下载器 - 核心爬虫模块
 
 import os
 import re
+import json
 import time
 import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Tuple
@@ -51,10 +52,18 @@ LIST_TYPE_ALIASES = {
     "10分钟+": "long",
 }
 
-# 通用请求头
+# 可用域名列表
+MIRROR_SITES = {
+    "ml0987.xyz": "https://ml0987.xyz",
+    "hsex.icu":   "https://hsex.icu",
+    "hsex.men":   "https://hsex.men",
+    "hsex.tv":    "https://hsex.tv",
+}
+
+# 通用请求头（Referer 使用占位符，运行时替换）
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Referer": "https://ml0987.xyz/",
+    "Referer": "",  # 运行时根据域名设置
 }
 
 # ==================== 工具函数 ====================
@@ -64,6 +73,63 @@ def sanitize_filename(name: str) -> str:
     for c in r'\/:*?"<>|':
         name = name.replace(c, '_')
     return name.strip().rstrip('.')
+
+
+def parse_relative_time(text: str) -> Optional[datetime]:
+    """将中文相对时间转换为日期（只取日期部分）"""
+    now = datetime.now()
+    text = text.strip()
+    
+    if not text:
+        return None
+    
+    # 已经是日期格式: 2026-03-28
+    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', text)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            pass
+    
+    # X分钟前
+    m = re.match(r'(\d+)\s*分钟前', text)
+    if m:
+        return now - timedelta(minutes=int(m.group(1)))
+    
+    # X小时前
+    m = re.match(r'(\d+)\s*小时前', text)
+    if m:
+        return now - timedelta(hours=int(m.group(1)))
+    
+    # X天前
+    m = re.match(r'(\d+)\s*天前', text)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+    
+    # X周前
+    m = re.match(r'(\d+)\s*周前', text)
+    if m:
+        return now - timedelta(weeks=int(m.group(1)))
+    
+    # X个月前（粗略按30天算）
+    m = re.match(r'(\d+)\s*个?月前', text)
+    if m:
+        return now - timedelta(days=int(m.group(1)) * 30)
+    
+    # X年前
+    m = re.match(r'(\d+)\s*年?前', text)
+    if m:
+        return now - timedelta(days=int(m.group(1)) * 365)
+    
+    # 昨天 / 前天
+    if '前天' in text:
+        return now - timedelta(days=2)
+    if '昨天' in text:
+        return now - timedelta(days=1)
+    if '今天' in text:
+        return now
+    
+    return None
 
 
 def http_get(url: str, timeout: int = 15, headers: dict = None, allow_redirects: bool = True) -> Optional[requests.Response]:
@@ -294,16 +360,57 @@ class TSDownloader:
 class CrawlerCore:
     """爬虫核心类（纯 requests，无浏览器依赖）"""
 
-    BASE_URL = "https://ml0987.xyz"
+    HISTORY_FILE = "download_history.json"
 
-    def __init__(self, config: dict, log_callback=None, progress_callback=None, info_callback=None):
+    def __init__(self, config: dict, log_callback=None, progress_callback=None, info_callback=None, base_url: str = None):
         self.config = config
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.info_callback = info_callback
         self._stop_flag = False
+        self.base_url = (base_url or config.get("site", "https://ml0987.xyz")).rstrip("/")
         self.session = requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
+        self.session.headers.update({**DEFAULT_HEADERS, "Referer": f"{self.base_url}/"})
+
+        # 已下载记录（防重复）
+        self._history = self._load_history()
+
+    def _get_history_path(self) -> Path:
+        """获取下载记录文件路径"""
+        output_dir = Path(self.config.get("output_dir", "downloads"))
+        return output_dir / self.HISTORY_FILE
+
+    def _load_history(self) -> Dict[str, dict]:
+        """加载已下载记录 {video_id: {title, date, url, ...}}"""
+        path = self._get_history_path()
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return {}
+
+    def _save_history(self):
+        """保存已下载记录"""
+        path = self._get_history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._history, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def _is_downloaded(self, video_id: str) -> bool:
+        """检查视频是否已下载过"""
+        return video_id in self._history
+
+    def _mark_downloaded(self, video_id: str, title: str, url: str, upload_date: str = None):
+        """标记视频已下载"""
+        self._history[video_id] = {
+            "title": title,
+            "url": url,
+            "upload_date": upload_date,
+            "download_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._save_history()
 
     def _log(self, message: str, level: str = "info"):
         """日志回调"""
@@ -361,12 +468,40 @@ class CrawlerCore:
             return title or None
         return None
 
+    def _extract_upload_date_from_html(self, video_url: str) -> Optional[str]:
+        """从视频详情页提取上传日期，返回 YYYY-MM-DD 格式"""
+        resp = http_get(video_url, timeout=15)
+        if not resp or resp.status_code != 200:
+            return None
+        # 匹配 "日期：xxx" 或 "日期:xxx"
+        match = re.search(r'日期[：:]\s*([^<]+)', resp.text)
+        if match:
+            date_str = match.group(1).strip()
+            dt = parse_relative_time(date_str)
+            if dt:
+                return dt.strftime("%Y-%m-%d")
+        return None
+
     # ==================== 单视频下载 ====================
 
-    def download_single(self, url: str, title: str = None, output_dir: Path = None) -> bool:
-        """下载单个视频"""
+    def download_single(self, url: str, title: str = None, video_id: str = None, upload_date: str = None, output_dir: Path = None) -> bool:
+        """下载单个视频
+        
+        Args:
+            url: 视频页面 URL
+            title: 视频标题
+            video_id: 视频ID（用于防重复）
+            upload_date: 上传日期 YYYY-MM-DD（用于分类存储）
+            output_dir: 输出根目录
+        """
         if self._stop_flag:
             return False
+
+        # 防重复检查
+        vid = video_id or self._extract_video_id(url)
+        if vid and self._is_downloaded(vid):
+            self._log(f"已下载过，跳过: {title or vid}", "warn")
+            return True  # 返回 True 表示已处理（跳过也算成功）
 
         # 提取 m3u8
         m3u8_url = self._extract_m3u8_from_html(url)
@@ -383,18 +518,28 @@ class CrawlerCore:
         if not title:
             title = self._extract_title_from_html(url) or f"视频_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # 如果没有传入上传日期，尝试从详情页提取
+        if not upload_date:
+            upload_date = self._extract_upload_date_from_html(url)
+
         if not output_dir:
             output_dir = Path(self.config.get("output_dir", "downloads"))
 
-        date_dir = output_dir / datetime.now().strftime("%Y-%m-%d")
-        title_dir = date_dir / sanitize_filename(title)
-        mp4_file = title_dir / f"{sanitize_filename(title)}.mp4"
+        # 按上传日期分类存储，如果没有日期则用下载当天日期
+        date_str = upload_date or datetime.now().strftime("%Y-%m-%d")
+        date_dir = output_dir / date_str
+        mp4_file = date_dir / f"{sanitize_filename(title)}.mp4"
 
+        # 文件已存在也视为成功
         if mp4_file.exists():
             self._log(f"文件已存在，跳过: {mp4_file.name}", "warn")
+            if vid:
+                self._mark_downloaded(vid, title, url, upload_date)
             return True
 
         self._log(f"开始下载: {title} ({len(parser.segments)} 个切片)")
+        if upload_date:
+            self._log(f"  上传日期: {upload_date}")
         downloader = TSDownloader(
             parser.segments,
             mp4_file,
@@ -406,16 +551,26 @@ class CrawlerCore:
 
         if success:
             self._log(f"下载完成: {title}")
+            if vid:
+                self._mark_downloaded(vid, title, url, upload_date)
         else:
             self._log(f"下载失败: {title}", "error")
 
         return success
 
+    def _extract_video_id(self, url: str) -> Optional[str]:
+        """从 URL 中提取视频 ID"""
+        m = re.search(r'video-(\d+)\.htm', url)
+        if m:
+            return m.group(1)
+        return None
+
     # ==================== 批量爬取 ====================
 
-    def crawl_batch(self, page_start: int, page_end: int, list_type: str = "list") -> int:
-        """批量爬取"""
+    def crawl_batch(self, page_start: int, page_end: int, list_type: str = "list") -> dict:
+        """批量爬取，返回 {success: int, skipped: int, total: int}"""
         total_success = 0
+        total_skipped = 0
 
         # 获取列表 URL 模板（支持中文名映射）
         list_key = LIST_TYPE_ALIASES.get(list_type, list_type)
@@ -425,6 +580,7 @@ class CrawlerCore:
             url_pattern = LIST_TYPES["list"]
 
         self._log(f"列表类型: {list_type}，页码范围: {page_start}-{page_end}")
+        self._log(f"已下载记录: {len(self._history)} 个视频")
 
         for page in range(page_start, page_end + 1):
             if self._stop_flag:
@@ -432,7 +588,7 @@ class CrawlerCore:
 
             self._log(f"正在爬取第 {page} 页...")
 
-            list_url = f"{self.BASE_URL}/{url_pattern.format(page=page)}"
+            list_url = f"{self.base_url}/{url_pattern.format(page=page)}"
             video_list = self._extract_video_urls(list_url)
             if not video_list:
                 self._log(f"第 {page} 页未发现视频", "warn")
@@ -445,8 +601,15 @@ class CrawlerCore:
                     break
 
                 url = video["url"]
+                vid = video.get("id")
                 title = video.get("title") or f"第{page}页_第{idx}个"
                 cover = video.get("cover") or ""
+
+                # 防重复检查（提前检查，避免不必要的请求）
+                if vid and self._is_downloaded(vid):
+                    self._log(f"[{idx}/{len(video_list)}] 已下载过，跳过: {title}")
+                    total_skipped += 1
+                    continue
 
                 self._log(f"[{idx}/{len(video_list)}] {title}")
                 self._log(f"  {url}")
@@ -458,16 +621,21 @@ class CrawlerCore:
                     except Exception:
                         pass
 
-                if self.download_single(url, title):
-                    total_success += 1
+                if self.download_single(url, title, video_id=vid):
+                    # 判断是真正下载了还是跳过了
+                    if vid and self._history.get(vid, {}).get("download_time"):
+                        # 刚标记的，是本次下载的
+                        total_success += 1
+                    else:
+                        total_skipped += 1
 
                 time.sleep(2)
 
-        self._log(f"批量爬取完成，成功: {total_success} 个")
-        return total_success
+        self._log(f"批量爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        return {"success": total_success, "skipped": total_skipped}
 
     def _extract_video_urls(self, list_url: str) -> List[dict]:
-        """提取视频链接，返回 [{'url', 'title', 'cover'}, ...]"""
+        """提取视频链接，返回 [{'url', 'id', 'title', 'cover'}, ...]"""
         try:
             resp = http_get(list_url, timeout=15)
             if not resp or resp.status_code != 200:
@@ -489,7 +657,8 @@ class CrawlerCore:
                 if vid not in seen_ids:
                     seen_ids.add(vid)
                     videos.append({
-                        "url": f"{self.BASE_URL}/{href}",
+                        "url": f"{self.base_url}/{href}",
+                        "id": vid,
                         "title": title,
                         "cover": cover,
                     })

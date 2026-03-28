@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ml0987 视频下载器 - GUI 版本
+hsex 视频下载器 - GUI 版本
 """
 
 import os
@@ -34,7 +34,6 @@ from crawler_core import CrawlerCore
 
 APP_DIR = Path(__file__).parent
 CONFIG_FILE = APP_DIR / "config.json"
-PROGRESS_FILE = APP_DIR / "progress.json"
 LOG_FILE = APP_DIR / "app.log"
 
 DEFAULT_CONFIG = {
@@ -45,6 +44,7 @@ DEFAULT_CONFIG = {
     "proxy_port": "1080",
     "proxy_user": "",
     "proxy_pass": "",
+    "site": "https://ml0987.xyz",
     "list_type": "list",
     "page_start": 1,
     "page_end": 3,
@@ -58,7 +58,7 @@ logging.basicConfig(
     handlers=[
         logging.handlers.RotatingFileHandler(
             LOG_FILE,
-            maxBytes=10*1024*1024,  # 10MB
+            maxBytes=10*1024*1024,
             backupCount=3,
             encoding="utf-8"
         ),
@@ -87,7 +87,7 @@ def download_image(url: str, timeout: int = 10) -> bytes:
     try:
         import requests
         resp = requests.get(url, timeout=timeout,
-                            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://ml0987.xyz/"})
+                            headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code == 200:
             return resp.content
     except Exception:
@@ -116,12 +116,13 @@ def save_config(cfg: dict):
     except Exception as e:
         logger.error(f"保存配置失败: {e}")
 
+
 # ==================== GUI 主界面 ====================
 
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("ml0987 视频下载器")
+        self.root.title("hsex 视频下载器")
         self.root.geometry("1000x720")
         self.root.minsize(800, 600)
 
@@ -135,103 +136,87 @@ class App:
         # 封面图片缓存
         self._cover_photo = None  # 保持引用防止 GC
 
+        # 批量爬取统计
+        self._batch_total_videos = 0
+        self._batch_done_videos = 0
+        self._batch_success = 0
+
         # 创建 UI
         self._create_widgets()
 
-        # 检查环境
-        self._check_environment()
-
-        # 检查 ffmpeg.exe
-        self.check_ffmpeg()
+        # 启动时静默检查环境，出错才提示
+        self._silent_env_check()
 
     def _create_widgets(self):
         """创建界面组件"""
-        # 创建 Notebook
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # 添加 Tab 页
-        self.tab_env = ttk.Frame(self.notebook)
+        # Tab 页顺序：批量爬取 → 单视频 → 设置 → 日志 → 环境检测（隐藏）
         self.tab_crawl = ttk.Frame(self.notebook)
         self.tab_single = ttk.Frame(self.notebook)
         self.tab_settings = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
+        self.tab_env = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.tab_env, text="  环境检测  ")
         self.notebook.add(self.tab_crawl, text="  批量爬取  ")
         self.notebook.add(self.tab_single, text="  单视频  ")
         self.notebook.add(self.tab_settings, text="  设置  ")
         self.notebook.add(self.tab_log, text="  日志  ")
+        # 环境检测 Tab 不显示标签，通过 select() 跳转
+        self.notebook.add(self.tab_env, text="  环境检测  ")
 
         # 构建各 Tab
-        self._build_tab_env()
         self._build_tab_crawl()
         self._build_tab_single()
         self._build_tab_settings()
         self._build_tab_log()
+        self._build_tab_env()
 
-    def _build_tab_env(self):
-        """环境检测 Tab"""
-        ttk.Label(self.tab_env, text="运行环境检查", font=("Arial", 14, "bold")).pack(pady=20)
-
-        # 检查结果框
-        result_frame = ttk.LabelFrame(self.tab_env, text="检查结果", padding=10)
-        result_frame.pack(fill="both", expand=True, padx=20, pady=10)
-
-        self.env_status_text = scrolledtext.ScrolledText(result_frame, height=15, wrap="word")
-        self.env_status_text.pack(fill="both", expand=True)
-
-        # 按钮
-        btn_frame = ttk.Frame(self.tab_env)
-        btn_frame.pack(fill="x", padx=20, pady=10)
-
-        ttk.Button(btn_frame, text="重新检查", command=self._check_environment).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="安装 Python 依赖", command=self._install_deps).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="下载 ffmpeg", command=self._download_ffmpeg).pack(side="left", padx=5)
+    # ==================== 批量爬取 Tab ====================
 
     def _build_tab_crawl(self):
         """批量爬取 Tab"""
-        ttk.Label(self.tab_crawl, text="批量爬取视频", font=("Arial", 14, "bold")).pack(pady=10)
-
         # 控制面板
         control_frame = ttk.LabelFrame(self.tab_crawl, text="爬取设置", padding=10)
-        control_frame.pack(fill="x", padx=20, pady=5)
+        control_frame.pack(fill="x", padx=20, pady=(10, 5))
 
-        # 列表类型
+        # 第一行：域名 + 列表类型
         type_frame = ttk.Frame(control_frame)
         type_frame.pack(fill="x", pady=3)
-        ttk.Label(type_frame, text="列表类型:").pack(side="left")
+        ttk.Label(type_frame, text="站点:").pack(side="left")
+        self.site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        site_combo = ttk.Combobox(type_frame, textvariable=self.site_var,
+                                  values=["https://ml0987.xyz", "https://hsex.icu", "https://hsex.men", "https://hsex.tv"],
+                                  width=16, state="readonly")
+        site_combo.pack(side="left", padx=(5, 20))
+        ttk.Label(type_frame, text="列表:").pack(side="left")
         self.list_type_var = tk.StringVar(value=self.config.get("list_type", "list"))
         type_combo = ttk.Combobox(type_frame, textvariable=self.list_type_var,
                                   values=["视频", "周榜", "月榜", "5分钟+", "10分钟+"],
                                   width=10, state="readonly")
         type_combo.pack(side="left", padx=5)
 
-        # 页码范围
+        # 第二行：页码 + 按钮
         page_frame = ttk.Frame(control_frame)
         page_frame.pack(fill="x", pady=3)
-        ttk.Label(page_frame, text="起始页码:").pack(side="left")
+        ttk.Label(page_frame, text="页码:").pack(side="left")
         self.page_start_var = tk.IntVar(value=self.config["page_start"])
-        ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_start_var, width=5).pack(side="left", padx=5)
-        ttk.Label(page_frame, text="结束页码:").pack(side="left")
+        ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_start_var, width=5).pack(side="left", padx=2)
+        ttk.Label(page_frame, text="~").pack(side="left")
         self.page_end_var = tk.IntVar(value=self.config["page_end"])
-        ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_end_var, width=5).pack(side="left", padx=5)
+        ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_end_var, width=5).pack(side="left", padx=(2, 15))
 
-        # 按钮
-        btn_frame = ttk.Frame(self.tab_crawl)
-        btn_frame.pack(fill="x", padx=20, pady=5)
-        ttk.Button(btn_frame, text="开始爬取", command=self._start_crawl).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="停止", command=self._stop_crawl).pack(side="left", padx=5)
+        ttk.Button(page_frame, text="▶ 开始爬取", command=self._start_crawl).pack(side="left", padx=3)
+        ttk.Button(page_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
 
-        # ===== 下方区域：左边封面预览 + 右边进度日志 =====
+        # 下方区域：左边封面 + 右边进度
         bottom_frame = ttk.Frame(self.tab_crawl)
-        bottom_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        bottom_frame.pack(fill="both", expand=True, padx=20, pady=(5, 10))
 
         # 左侧：封面预览
-        cover_frame = ttk.LabelFrame(bottom_frame, text="当前视频预览", padding=5)
+        cover_frame = ttk.LabelFrame(bottom_frame, text="当前视频", padding=5)
         cover_frame.pack(side="left", fill="y", padx=(0, 10))
-
-        # 固定宽度
         cover_frame.configure(width=220)
         cover_frame.pack_propagate(False)
 
@@ -245,31 +230,43 @@ class App:
                                              font=("Arial", 9))
         self.preview_title_label.pack(fill="x", pady=(5, 0))
 
-        # 右侧：进度和日志
-        right_frame = ttk.LabelFrame(bottom_frame, text="进度", padding=5)
+        # 右侧：进度
+        right_frame = ttk.LabelFrame(bottom_frame, text="下载进度", padding=5)
         right_frame.pack(side="left", fill="both", expand=True)
 
-        self.crawl_progress = ttk.Progressbar(right_frame, mode="determinate")
-        self.crawl_progress.pack(fill="x", pady=(0, 5))
+        # 整体进度标签（视频计数）
+        self.crawl_overall_label = tk.Label(right_frame, text="就绪",
+                                             font=("Arial", 9), anchor="w")
+        self.crawl_overall_label.pack(fill="x")
 
-        self.crawl_status_text = scrolledtext.ScrolledText(right_frame, height=12, wrap="word",
+        # 进度条（当前视频切片进度）
+        self.crawl_progress = ttk.Progressbar(right_frame, mode="determinate")
+        self.crawl_progress.pack(fill="x", pady=(3, 5))
+
+        # 切片进度标签
+        self.crawl_slice_label = tk.Label(right_frame, text="",
+                                           font=("Consolas", 9), anchor="w", fg="#555")
+        self.crawl_slice_label.pack(fill="x")
+
+        # 日志文本框
+        self.crawl_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
-        self.crawl_status_text.pack(fill="both", expand=True)
+        self.crawl_status_text.pack(fill="both", expand=True, pady=(5, 0))
+
+    # ==================== 单视频 Tab ====================
 
     def _build_tab_single(self):
         """单视频 Tab"""
-        ttk.Label(self.tab_single, text="单个视频下载", font=("Arial", 14, "bold")).pack(pady=20)
-
         # URL 输入
         url_frame = ttk.LabelFrame(self.tab_single, text="视频 URL", padding=10)
-        url_frame.pack(fill="x", padx=20, pady=10)
+        url_frame.pack(fill="x", padx=20, pady=(20, 5))
 
         self.url_var = tk.StringVar()
         ttk.Entry(url_frame, textvariable=self.url_var, width=60).pack(fill="x", padx=5, pady=5)
 
         # 标题输入
-        title_frame = ttk.LabelFrame(self.tab_single, text="视频标题（可选）", padding=10)
-        title_frame.pack(fill="x", padx=20, pady=10)
+        title_frame = ttk.LabelFrame(self.tab_single, text="视频标题（可选，留空自动获取）", padding=10)
+        title_frame.pack(fill="x", padx=20, pady=5)
 
         self.title_var = tk.StringVar()
         ttk.Entry(title_frame, textvariable=self.title_var, width=60).pack(fill="x", padx=5, pady=5)
@@ -277,16 +274,28 @@ class App:
         # 按钮
         btn_frame = ttk.Frame(self.tab_single)
         btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="开始下载", command=self._start_single).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="停止", command=self._stop_crawl).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="▶ 开始下载", command=self._start_single).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=5)
 
         # 进度显示
-        progress_frame = ttk.LabelFrame(self.tab_single, text="进度", padding=10)
-        progress_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        progress_frame = ttk.LabelFrame(self.tab_single, text="下载进度", padding=10)
+        progress_frame.pack(fill="both", expand=True, padx=20, pady=(5, 20))
+
+        self.single_overall_label = tk.Label(progress_frame, text="就绪",
+                                              font=("Arial", 9), anchor="w")
+        self.single_overall_label.pack(fill="x")
+
         self.single_progress = ttk.Progressbar(progress_frame, mode="determinate")
-        self.single_progress.pack(fill="x", pady=5)
-        self.single_status_text = scrolledtext.ScrolledText(progress_frame, height=10, wrap="word")
-        self.single_status_text.pack(fill="both", expand=True)
+        self.single_progress.pack(fill="x", pady=(3, 5))
+
+        self.single_slice_label = tk.Label(progress_frame, text="",
+                                            font=("Consolas", 9), anchor="w", fg="#555")
+        self.single_slice_label.pack(fill="x")
+
+        self.single_status_text = scrolledtext.ScrolledText(progress_frame, height=8, wrap="word")
+        self.single_status_text.pack(fill="both", expand=True, pady=(5, 0))
+
+    # ==================== 设置 Tab ====================
 
     def _build_tab_settings(self):
         """设置 Tab"""
@@ -306,55 +315,74 @@ class App:
         proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理（可选）", padding=10)
         proxy_frame.pack(fill="x", padx=20, pady=10)
 
-        # 代理启用复选框
         self.proxy_enabled_var = tk.BooleanVar(value=self.config.get("proxy_enabled", False))
         ttk.Checkbutton(proxy_frame, text="启用代理", variable=self.proxy_enabled_var).pack(anchor="w", padx=5, pady=5)
 
-        ttk.Label(proxy_frame, text="主机:").pack(anchor="w", padx=5)
+        row1 = ttk.Frame(proxy_frame)
+        row1.pack(fill="x", padx=5, pady=2)
+        ttk.Label(row1, text="主机:").pack(side="left")
         self.proxy_host_var = tk.StringVar(value=self.config["proxy_host"])
-        ttk.Entry(proxy_frame, textvariable=self.proxy_host_var).pack(fill="x", padx=5, pady=5)
-
-        ttk.Label(proxy_frame, text="端口:").pack(anchor="w", padx=5)
+        ttk.Entry(row1, textvariable=self.proxy_host_var).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Label(row1, text="端口:").pack(side="left")
         self.proxy_port_var = tk.StringVar(value=self.config["proxy_port"])
-        ttk.Entry(proxy_frame, textvariable=self.proxy_port_var).pack(fill="x", padx=5, pady=5)
+        ttk.Entry(row1, textvariable=self.proxy_port_var, width=8).pack(side="left", padx=5)
 
-        # 账号密码
-        auth_frame = ttk.Frame(proxy_frame)
-        auth_frame.pack(fill="x", padx=5, pady=5)
-        ttk.Label(auth_frame, text="账号（可选）:").pack(anchor="w")
+        row2 = ttk.Frame(proxy_frame)
+        row2.pack(fill="x", padx=5, pady=2)
+        ttk.Label(row2, text="账号:").pack(side="left")
         self.proxy_user_var = tk.StringVar(value=self.config["proxy_user"])
-        ttk.Entry(auth_frame, textvariable=self.proxy_user_var).pack(fill="x")
-        ttk.Label(auth_frame, text="密码（可选）:").pack(anchor="w")
+        ttk.Entry(row2, textvariable=self.proxy_user_var).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Label(row2, text="密码:").pack(side="left")
         self.proxy_pass_var = tk.StringVar(value=self.config["proxy_pass"])
-        ttk.Entry(auth_frame, textvariable=self.proxy_pass_var, show="*").pack(fill="x")
+        ttk.Entry(row2, textvariable=self.proxy_pass_var, show="*", width=12).pack(side="left", padx=5)
 
         # 保存按钮
         btn_frame = ttk.Frame(self.tab_settings)
         btn_frame.pack(fill="x", padx=20, pady=10)
         ttk.Button(btn_frame, text="保存设置", command=self._save_settings).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="检查环境", command=self._manual_env_check).pack(side="left", padx=5)
+
+    # ==================== 日志 Tab ====================
 
     def _build_tab_log(self):
         """日志 Tab"""
-        ttk.Label(self.tab_log, text="运行日志", font=("Arial", 14, "bold")).pack(pady=20)
-
         log_frame = ttk.Frame(self.tab_log)
         log_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap="word")
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap="word",
+                                                   font=("Consolas", 9))
         self.log_text.pack(fill="both", expand=True)
 
         btn_frame = ttk.Frame(self.tab_log)
-        btn_frame.pack(fill="x", padx=20, pady=10)
+        btn_frame.pack(fill="x", padx=20, pady=(0, 10))
         ttk.Button(btn_frame, text="清空日志", command=self._clear_log).pack(side="left", padx=5)
+
+    # ==================== 环境检测 Tab ====================
+
+    def _build_tab_env(self):
+        """环境检测 Tab"""
+        ttk.Label(self.tab_env, text="运行环境检查", font=("Arial", 14, "bold")).pack(pady=20)
+
+        result_frame = ttk.LabelFrame(self.tab_env, text="检查结果", padding=10)
+        result_frame.pack(fill="both", expand=True, padx=20, pady=10)
+
+        self.env_status_text = scrolledtext.ScrolledText(result_frame, height=15, wrap="word")
+        self.env_status_text.pack(fill="both", expand=True)
+
+        btn_frame = ttk.Frame(self.tab_env)
+        btn_frame.pack(fill="x", padx=20, pady=10)
+
+        ttk.Button(btn_frame, text="重新检查", command=self._manual_env_check).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="安装 Python 依赖", command=self._install_deps).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="下载 ffmpeg", command=self._download_ffmpeg).pack(side="left", padx=5)
 
     # ==================== 封面预览 ====================
 
     def _update_cover_preview(self, info: dict):
-        """在线程中下载封面，然后通过 root.after 更新 UI"""
+        """在子线程下载封面，通过 root.after 更新 UI"""
         cover_url = info.get("cover", "")
         title = info.get("title", "")
 
-        # 先更新标题（线程安全）
         try:
             self.root.after(0, lambda: self.preview_title_label.config(text=title))
         except Exception:
@@ -363,28 +391,21 @@ class App:
         if not cover_url:
             return
 
-        # 在子线程下载图片
         img_data = download_image(cover_url)
         if not img_data:
             return
 
-        # 调度到主线程显示图片
         def show_image():
             try:
                 if HAS_PIL:
-                    # 用 PIL 缩放图片
                     img = Image.open(io.BytesIO(img_data))
-                    # 目标尺寸
-                    w, h = 200, 130
-                    img.thumbnail((w, h), Image.LANCZOS)
+                    img.thumbnail((200, 130), Image.LANCZOS)
                     self._cover_photo = ImageTk.PhotoImage(img)
                     self.cover_label.config(image=self._cover_photo, text="", bg="white")
                 else:
-                    # 没有 PIL，直接显示原始数据（仅支持 GIF/PNG/PGM/PPM）
                     self._cover_photo = tk.PhotoImage(data=img_data)
                     self.cover_label.config(image=self._cover_photo, text="", bg="white")
             except Exception:
-                # webp 等格式 tkinter 无法直接显示
                 self.cover_label.config(image="", text="封面加载失败\n(需要 Pillow)", bg="#f0f0f0")
 
         try:
@@ -392,60 +413,99 @@ class App:
         except Exception:
             pass
 
-    # ==================== 功能方法 ====================
+    # ==================== 环境检测 ====================
 
-    def _check_environment(self):
-        """检查运行环境"""
-        self.env_status_text.delete(1.0, tk.END)
+    def _silent_env_check(self):
+        """启动时静默检查，出错才跳转到环境检测 Tab"""
+        errors = []
 
-        # 检测 ffmpeg.exe
+        # 检测 ffmpeg
         ffmpeg_path = get_ffmpeg_path()
-        ffmpeg_found = ffmpeg_path.exists()
-
-        self._append_status(f"ffmpeg:", "OK" if ffmpeg_found else "FAIL")
-        if not ffmpeg_found:
-            self._append_status(f"  请将 ffmpeg.exe 放置于: {ffmpeg_path.parent}", "WARN")
-        else:
-            self._append_status(f"  路径: {ffmpeg_path}", "OK")
+        if not ffmpeg_path.exists():
+            errors.append(f"ffmpeg.exe 未找到（需放在: {ffmpeg_path.parent}）")
 
         # 检测 requests
         try:
             import requests
-            self._append_status(f"requests: OK (v{requests.__version__})", "OK")
         except ImportError:
-            self._append_status(f"requests: 未安装", "FAIL")
-
-        # 检测 Pillow
-        if HAS_PIL:
-            self._append_status(f"Pillow: OK (封面预览可用)", "OK")
-        else:
-            self._append_status(f"Pillow: 未安装 (封面预览不可用，可运行 pip install Pillow)", "WARN")
+            errors.append("requests 未安装（运行: pip install requests）")
 
         # 检测 pycryptodome
         try:
             from Crypto.Cipher import AES
+        except ImportError:
+            errors.append("pycryptodome 未安装（加密视频无法下载）")
+
+        if errors:
+            # 跳转到环境检测 Tab
+            env_tab_index = self.notebook.index(self.tab_env)
+            self.notebook.select(env_tab_index)
+            # 填充检查结果
+            self._check_environment(errors)
+        else:
+            # 正常，显示环境检测内容但不跳转
+            self._check_environment([])
+
+    def _manual_env_check(self):
+        """手动触发环境检查，跳转到该 Tab"""
+        errors = []
+        ffmpeg_path = get_ffmpeg_path()
+        if not ffmpeg_path.exists():
+            errors.append(f"ffmpeg.exe 未找到（需放在: {ffmpeg_path.parent}）")
+        try:
+            import requests
+        except ImportError:
+            errors.append("requests 未安装")
+        if not HAS_PIL:
+            errors.append("Pillow 未安装（封面预览不可用）")
+        try:
+            from Crypto.Cipher import AES
+        except ImportError:
+            errors.append("pycryptodome 未安装")
+
+        self._check_environment(errors)
+        self.notebook.select(self.notebook.index(self.tab_env))
+
+    def _check_environment(self, errors: list):
+        """检查运行环境并显示结果"""
+        self.env_status_text.delete(1.0, tk.END)
+
+        # ffmpeg
+        ffmpeg_path = get_ffmpeg_path()
+        if ffmpeg_path.exists():
+            self._append_status(f"ffmpeg: OK  ({ffmpeg_path})", "OK")
+        else:
+            self._append_status(f"ffmpeg: 未找到", "FAIL")
+            self._append_status(f"  请放置于: {ffmpeg_path.parent}", "WARN")
+
+        # requests
+        try:
+            import requests
+            self._append_status(f"requests: OK (v{requests.__version__})", "OK")
+        except ImportError:
+            self._append_status(f"requests: 未安装 (pip install requests)", "FAIL")
+
+        # Pillow
+        if HAS_PIL:
+            self._append_status(f"Pillow: OK (封面预览可用)", "OK")
+        else:
+            self._append_status(f"Pillow: 未安装 (pip install Pillow)", "WARN")
+
+        # pycryptodome
+        try:
+            from Crypto.Cipher import AES
             self._append_status(f"pycryptodome: OK (AES 解密可用)", "OK")
         except ImportError:
-            self._append_status(f"pycryptodome: 未安装 (加密视频无法下载)", "WARN")
+            self._append_status(f"pycryptodome: 未安装 (pip install pycryptodome)", "WARN")
 
-        return ffmpeg_found
-
-    def check_ffmpeg(self):
-        """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
-        ffmpeg_path = get_ffmpeg_path()
-
-        if not ffmpeg_path.exists():
-            result = messagebox.askyesno(
-                "缺少 ffmpeg.exe",
-                f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
-                f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
-                f"请将 ffmpeg.exe 放置于: {ffmpeg_path.parent}\n\n"
-                f"是否跳转到 ffmpeg 官网下载？"
-            )
-            if result:
-                import webbrowser
-                webbrowser.open("https://ffmpeg.org/download.html")
-        return ffmpeg_path.exists()
+        if errors:
+            self._append_status("", "")
+            self._append_status("⚠ 以下问题需要解决:", "FAIL")
+            for e in errors:
+                self._append_status(f"  ✗ {e}", "FAIL")
+        else:
+            self._append_status("", "")
+            self._append_status("✓ 环境检查通过，所有依赖就绪", "OK")
 
     def _append_status(self, text, status):
         """追加状态信息"""
@@ -466,32 +526,31 @@ class App:
                 [sys.executable, "-m", "pip", "install", "-r", str(get_app_dir() / "requirements.txt")],
                 capture_output=True, text=True
             )
-
             self.env_status_text.insert(tk.END, result.stdout)
             if result.returncode == 0:
                 self.env_status_text.insert(tk.END, "\n依赖安装成功\n")
             else:
                 self.env_status_text.insert(tk.END, f"\n安装失败: {result.stderr}\n")
-
-            self._check_environment()
+            self._check_environment([])
         except Exception as e:
             self.env_status_text.insert(tk.END, f"\n安装失败: {e}\n")
 
     def _download_ffmpeg(self):
         """下载 ffmpeg"""
         import webbrowser
-        webbrowser.open("https://ffmpeg.org/download.html")
-        messagebox.showinfo("下载 ffmpeg", "请在浏览器中下载 ffmpeg 并解压到指定目录")
+        webbrowser.open("https://www.gyan.dev/ffmpeg/builds/")
+        messagebox.showinfo("下载 ffmpeg", "请下载 ffmpeg-release-essentials.zip，解压后将 ffmpeg.exe 放到程序目录")
+
+    # ==================== 通用功能 ====================
 
     def _browse_dir(self):
-        """浏览目录"""
         path = filedialog.askdirectory()
         if path:
             self.save_dir_var.set(path)
 
     def _save_settings(self):
-        """保存设置"""
         self.config["output_dir"] = self.save_dir_var.get()
+        self.config["site"] = self.site_var.get()
         self.config["proxy_enabled"] = self.proxy_enabled_var.get()
         self.config["proxy_host"] = self.proxy_host_var.get()
         self.config["proxy_port"] = self.proxy_port_var.get()
@@ -501,11 +560,12 @@ class App:
         messagebox.showinfo("保存成功", "设置已保存")
 
     def _clear_log(self):
-        """清空日志"""
         self.log_text.delete(1.0, tk.END)
 
+    # ==================== 日志/状态 UI 输出 ====================
+
     def _log_to_ui(self, text, level="info"):
-        """记录日志到 UI（线程安全，通过 root.after 调度到主线程）"""
+        """记录日志到 UI（线程安全）"""
         timestamp = time.strftime("%H:%M:%S")
         prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
         line = f"[{timestamp}] {prefix} {text}\n"
@@ -516,7 +576,6 @@ class App:
         logger.info(text)
 
     def _append_log(self, line):
-        """在主线程中安全追加日志"""
         self.log_text.insert(tk.END, line)
         self.log_text.see(tk.END)
 
@@ -530,9 +589,21 @@ class App:
             pass
 
     def _append_text(self, widget, text):
-        """在主线程中安全追加文本到指定控件"""
         widget.insert(tk.END, f"{text}\n")
         widget.see(tk.END)
+
+    def _update_progress(self, progressbar, current, total, label_widget=None, label_text=None):
+        """更新进度条（线程安全）"""
+        if total > 0:
+            percent = (current / total) * 100
+            try:
+                self.root.after(0, lambda: progressbar.configure(value=percent))
+                if label_widget and label_text:
+                    self.root.after(0, lambda: label_widget.config(text=label_text))
+            except Exception:
+                pass
+
+    # ==================== 批量爬取 ====================
 
     def _start_crawl(self):
         """开始批量爬取"""
@@ -540,23 +611,42 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
-        # 初始化爬虫
+        # 清空进度
+        self._batch_done_videos = 0
+        self._batch_success = 0
+        self._batch_total_videos = 0
+
+        def on_progress(current, total):
+            """当前视频的切片进度"""
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self._update_progress(
+                self.crawl_progress, current, total,
+                self.crawl_slice_label,
+                f"切片: {pct}"
+            )
+
         self.crawler = CrawlerCore(
             self.config,
             log_callback=self._log_to_ui,
-            progress_callback=lambda c, t: self._update_progress(self.crawl_progress, c, t),
+            progress_callback=on_progress,
             info_callback=self._update_cover_preview,
+            base_url=self.site_var.get(),
         )
 
-        # 在新线程中运行
         def run():
             try:
-                self.crawler.crawl_batch(
+                self.root.after(0, lambda: self.crawl_overall_label.config(text="正在爬取..."))
+                result = self.crawler.crawl_batch(
                     page_start=self.page_start_var.get(),
                     page_end=self.page_end_var.get(),
                     list_type=self.list_type_var.get()
                 )
-                self._status_to_ui(self.crawl_status_text, "批量爬取完成")
+                success = result.get("success", 0)
+                skipped = result.get("skipped", 0)
+                self.root.after(0, lambda: self.crawl_overall_label.config(
+                    text=f"完成 — 新下载: {success}，跳过: {skipped}"
+                ))
+                self._status_to_ui(self.crawl_status_text, f"── 批量爬取完成（新下载: {success}，跳过: {skipped}） ──")
             except Exception as e:
                 self._status_to_ui(self.crawl_status_text, f"错误: {e}")
                 logger.exception("批量爬取失败")
@@ -564,6 +654,8 @@ class App:
         self.crawl_thread = threading.Thread(target=run)
         self.crawl_thread.daemon = True
         self.crawl_thread.start()
+
+    # ==================== 单视频下载 ====================
 
     def _start_single(self):
         """开始单个下载"""
@@ -578,18 +670,27 @@ class App:
 
         title = self.title_var.get().strip() or None
 
-        # 初始化爬虫
+        def on_progress(current, total):
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self._update_progress(
+                self.single_progress, current, total,
+                self.single_slice_label,
+                f"切片: {pct}"
+            )
+
         self.crawler = CrawlerCore(
             self.config,
             log_callback=self._log_to_ui,
-            progress_callback=lambda c, t: self._update_progress(self.single_progress, c, t)
+            progress_callback=on_progress,
+            base_url=self.site_var.get(),
         )
 
-        # 在新线程中运行
         def run():
             try:
+                self.root.after(0, lambda: self.single_overall_label.config(text="正在下载..."))
                 self.crawler.download_single(url, title)
-                self._status_to_ui(self.single_status_text, "下载完成")
+                self.root.after(0, lambda: self.single_overall_label.config(text="下载完成"))
+                self._status_to_ui(self.single_status_text, "── 下载完成 ──")
             except Exception as e:
                 self._status_to_ui(self.single_status_text, f"错误: {e}")
                 logger.exception("单个下载失败")
@@ -598,26 +699,24 @@ class App:
         self.crawl_thread.daemon = True
         self.crawl_thread.start()
 
+    # ==================== 停止 ====================
+
     def _stop_crawl(self):
         """停止任务"""
         if self.crawler:
             self.crawler.stop()
             if self.crawl_thread and self.crawl_thread.is_alive():
                 self.crawl_thread.join(timeout=5)
-            self._status_to_ui(self.crawl_status_text, "已停止")
-            self._status_to_ui(self.single_status_text, "已停止")
-
-    def _update_progress(self, progressbar, current, total):
-        """更新进度条（线程安全）"""
-        if total > 0:
-            percent = (current / total) * 100
+            self._status_to_ui(self.crawl_status_text, "── 已停止 ──")
+            self._status_to_ui(self.single_status_text, "── 已停止 ──")
             try:
-                self.root.after(0, lambda: progressbar.configure(value=percent))
+                self.root.after(0, lambda: self.crawl_overall_label.config(text="已停止"))
+                self.root.after(0, lambda: self.single_overall_label.config(text="已停止"))
             except Exception:
                 pass
 
+
 def main():
-    """主函数"""
     root = tk.Tk()
     app = App(root)
     root.mainloop()
