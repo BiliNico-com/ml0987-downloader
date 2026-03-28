@@ -1,59 +1,106 @@
-# 这里的名称要和你的仓库名字完全一致
+name: Build Windows Executable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.py'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build with PyInstaller
+      run: pyinstaller --onefile --windowed --name "ml0987-downloader" app.py
+
+    - name: Verify build output
+      run: |
+        if exist "dist\ml0987-downloader.exe" (
+          echo Build successful
+        ) else (
+          echo Build failed
+          exit 1
+        )
+
+    - name: Create release package
+      run: |
+        cd dist
+        7z a ml0987-downloader-windows.zip ml0987-downloader.exe
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ml0987-downloader-windows
+        path: dist/ml0987-downloader-windows.zip
+        retention-days: 30
 name: Build ml0987 Downloader
 
-# 触发条件
 on:
-  workflow_dispatch:     # 手动触发
+  workflow_dispatch:
   push:
     branches:
       - main
     paths:
-      - 'crawler/**'
-      - '.github/workflows/build.yml'    # 监听这个文件的变化
+      - '**/*.py'
+      - 'requirements.txt'
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
-    # 注意：改为 windows-latest，而不是 ubuntu-latest
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # 设置 Python 环境
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'   # 确保使用的是 Python 3.11
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
-      # 安装依赖
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r crawler/requirements.txt
-          pip install pyinstaller
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
 
-      # 使用 PyInstaller 打包成 Windows exe
-      - name: Build with PyInstaller
-        shell: powershell     # 使用 PowerShell 脚本
-        run: |
-          # 注意：这里是相对于 repository root 的路径
-          # 假设你的项目结构是：crawler/app.py
-          # 也就是在根目录下有一个 crawler 文件夹，里面包含 app.py
-          # 所以需要先进入 crawler 目录
-          cd crawler
-          
-          # 使用 PyInstaller 打包
-          # 注意：-F 表示生成单个 exe 文件，-w 表示不显示控制台窗口
-          # --name 指定生成的 exe 文件名
-          # 指定入口文件是 app.py
-          pyinstaller -F -w --name ml0987_downloader app.py
+    - name: Build with PyInstaller
+      run: pyinstaller --onefile --windowed --name "ml0987-downloader" app.py
 
-      # 上传生成的 exe 文件作为构建产物
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ml0987_downloader-windows
-          path: crawler/dist/ml0987_downloader.exe    # 注意：这里要和上面 --name 指定的名称一致
-          retention-days: 30
+    - name: Verify build output
+      run: |
+        if exist "dist\ml0987-downloader.exe" (
+          echo Build successful
+        ) else (
+          echo Build failed
+          exit 1
+        )
 
+    - name: Create release package
+      run: |
+        cd dist
+        7z a ml0987-downloader-windows.zip ml0987-downloader.exe
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ml0987-downloader-windows
+        path: dist/ml0987-downloader-windows.zip
+        retention-days: 30
