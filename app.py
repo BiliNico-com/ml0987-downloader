@@ -326,10 +326,10 @@ class App:
         self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="搜索到的作者（勾选要下载的）", padding=5)
         # 不 pack，由 _toggle_search_mode 控制显示
         self.search_author_listbox_frame = ttk.Frame(self.search_author_list_frame)
-        self.search_author_listbox_frame.pack(fill="both", expand=True)
+        self.search_author_listbox_frame.pack(fill="x")
 
-        # 用 Canvas + Scrollbar + Checkbutton 实现可勾选列表
-        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=100)
+        # 用 Canvas + Scrollbar + Checkbutton 实现可勾选列表（固定高度，不抢占空间）
+        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=80)
         self._author_scrollbar = ttk.Scrollbar(self.search_author_listbox_frame, orient="vertical", command=self._author_canvas.yview)
         self._author_inner_frame = ttk.Frame(self._author_canvas)
         self._author_inner_frame.bind("<Configure>", lambda e: self._author_canvas.configure(scrollregion=self._author_canvas.bbox("all")))

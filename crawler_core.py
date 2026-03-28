@@ -851,20 +851,24 @@ class CrawlerCore:
             return []
 
         authors = []
-        # 匹配作者链接: <a href="user.htm?author=xxx">名字 数量</a>
+        seen_names = set()
+        # 匹配作者链接（带 badge 的，即搜索结果区的按钮样式）
+        # <a class="btn btn-default" href="user.htm?author=xxx" role="button">&nbsp;名字&nbsp;<span class="badge">数量</span></a>
         for m in re.finditer(
-            r'<a[^>]*href="user\.htm\?author=([^"]+)"[^>]*>([^<]*?)(\d+)\s*</a>',
+            r'<a[^>]*class="[^"]*btn[^"]*"[^>]*href="user\.htm\?author=([^"]+)"[^>]*>\s*(&nbsp;)*([^<&]+)\s*(&nbsp;)*\s*<span[^>]*class="[^"]*badge[^"]*"[^>]*>\s*(\d+)\s*</span>\s*</a>',
             resp.text
         ):
             author_param = m.group(1)
-            name_part = m.group(2).strip().rstrip(',').rstrip('，')
-            count = int(m.group(3))
-            authors.append({
-                "name": name_part or author_param,
-                "param": author_param,
-                "url": f"{self.base_url}/user.htm?author={author_param}",
-                "count": count,
-            })
+            name_part = m.group(3).strip()
+            count = int(m.group(5))
+            if name_part not in seen_names:
+                seen_names.add(name_part)
+                authors.append({
+                    "name": name_part or author_param,
+                    "param": author_param,
+                    "url": f"{self.base_url}/user.htm?author={author_param}",
+                    "count": count,
+                })
 
         return authors
 
