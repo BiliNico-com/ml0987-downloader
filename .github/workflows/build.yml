@@ -45,7 +45,7 @@ jobs:
 
       - name: 打包EXE
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "%APP_NAME%" --add-data "crawler_core.py;." --add-data "socks.py;." --hidden-import PIL --hidden-import PIL.ImageTk --hidden-import PIL.WebPImagePlugin --hidden-import Crypto.Cipher --collect-all Pillow --collect-all pycryptodome app.py
+          pyinstaller --noconfirm --onedir --windowed --contents-directory Core --name "%APP_NAME%" --add-data "crawler_core.py;." --add-data "socks.py;." --hidden-import PIL --hidden-import PIL.ImageTk --hidden-import PIL.WebPImagePlugin --hidden-import Crypto.Cipher --collect-all Pillow --collect-all pycryptodome app.py
 
       - name: 创建FFmpeg临时目录
         run: |
