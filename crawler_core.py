@@ -1,887 +1,582 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-crawler_core.py  —— 对齐油猴脚本"媒体资源嗅探及下载 v1.985"的完整实现
-═══════════════════════════════════════════════════════════════════════
-油猴脚本嗅探来源（全部实现）：
-  1. PerformanceObserver  → 监听 resource 条目（audio/video/xmlhttprequest/fetch）
-  2. GM_webRequest        → 拦截 *.m3u8* 请求
-  3. <video src>          → 扫描 DOM video 标签
-  4. <audio src>          → 扫描 DOM audio 标签
-  5. <source src>         → 扫描 DOM source 标签
-  本工具通过 CDP Network.responseReceived + Network.requestWillBeSent 一次性覆盖全部来源
-
-m3u8 处理（对齐油猴脚本）：
-  ✅ 嵌套 m3u8（master playlist）→ 自动选最高分辨率子流
-  ✅ AES-128 加密 m3u8           → 自动下载 key 文件并解密
-  ✅ 广告过滤                    → 移除 #EXT-X-DISCONTINUITY 片段
-  ✅ #EXT-X-MAP 初始化分片支持
-  ✅ 相对路径 ts URL 自动补全（多种格式）
-
-下载方式（对齐油猴脚本）：
-  ✅ m3u8 → 并发下载 ts 切片 → 合并 → ffmpeg 封装 mp4
-  ✅ mp4  → ffmpeg 直接封装（-c copy）
+ml0987 视频下载器 - 核心爬虫模块
+支持 Selenium + CDP 嗅探 m3u8、AES-128 解密、并发下载 ts 切片
 """
 
 import os
-import re
 import sys
 import json
+import re
 import time
-import shutil
-import logging
+import base64
 import hashlib
-import threading
+import logging
 import subprocess
-import urllib.request
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
-from typing import Callable, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, List, Dict, Tuple
 
-log = logging.getLogger(__name__)
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+except ImportError:
+    webdriver = None
 
-BASE_URL      = "https://ml0987.xyz"
-PROGRESS_FILE = Path(__file__).parent / "progress.json"
-# 并发下载 ts 切片的线程数（对齐油猴脚本 xcNum=15）
-TS_THREADS    = 15
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+except ImportError:
+    ChromeDriverManager = None
 
-# ──────────────────────────────────────────────
-#  工具函数
-# ──────────────────────────────────────────────
-def safe_filename(name: str, max_len: int = 80) -> str:
-    name = re.sub(r'[\\/:*?"<>|\r\n\t]', "_", name)
-    name = re.sub(r'\s+', " ", name).strip("_. ")
-    return name[:max_len] or "untitled"
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import unpad
+except ImportError:
+    AES = None
 
-def today_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
+try:
+    import requests
+except ImportError:
+    requests = None
 
-def load_progress() -> set:
-    if PROGRESS_FILE.exists():
-        try:
-            return set(json.loads(PROGRESS_FILE.read_text("utf-8")))
-        except Exception:
-            pass
-    return set()
+# ==================== 日志 ====================
 
-def save_progress(done: set):
-    PROGRESS_FILE.write_text(
-        json.dumps(sorted(done), ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+logger = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────
-#  m3u8 / 媒体 URL 类型判断（对齐油猴脚本逻辑）
-# ──────────────────────────────────────────────
-M3U8_MIME = {
-    "application/vnd.apple.mpegurl",
-    "application/x-mpegurl",
-    "audio/mpegurl",
-    "audio/x-mpegurl",
-    "video/mpegurl",
-    "video/x-mpegurl",
-}
+# ==================== 工具函数 ====================
 
-def classify_url(url: str, mime: str = "", content_preview: str = "") -> Optional[str]:
-    """
-    返回类型字符串：'hls' | 'mp4' | 'audio' | None
-    对齐油猴脚本 GM_xhr onload 中的 Type 判断逻辑
-    """
-    url_lower = url.lower().split("?")[0]
-    mime_lower = mime.lower().split(";")[0].strip()
+def sanitize_filename(name: str) -> str:
+    """清理文件名，移除非法字符"""
+    # Windows 非法字符：\ / : * ? " < > |
+    for c in r'\/:*?"<>|':
+        name = name.replace(c, '_')
+    return name.strip()
 
-    # m3u8 判断
-    if url_lower.endswith(".m3u8") or "m3u8" in url.lower():
-        return "hls"
-    if mime_lower in M3U8_MIME:
-        return "hls"
-    # 内容嗅探（响应体首行）
-    if content_preview and content_preview.strip().startswith("#EXTM3U"):
-        return "hls"
-
-    # mp4 判断
-    if url_lower.endswith(".mp4") or re.search(r"mp4[\?\&]", url_lower):
-        return "mp4"
-    if "video/mp4" in mime_lower:
-        return "mp4"
-
-    # audio 判断
-    if url_lower.endswith(".mp3") or url_lower.endswith(".m4a") or url_lower.endswith(".ogg"):
-        return "audio"
-    if "audio/" in mime_lower:
-        return "audio"
-
+def get_content(url: str, timeout: int = 10, headers: dict = None) -> Optional[str]:
+    """获取 URL 内容"""
+    if not requests:
+        return None
+    
+    try:
+        resp = requests.get(url, timeout=timeout, headers=headers or {})
+        if resp.status_code == 200:
+            return resp.text
+    except Exception as e:
+        logger.error(f"获取 {url} 失败: {e}")
     return None
 
-def is_media_url(url: str, mime: str = "") -> bool:
-    return classify_url(url, mime) is not None
+# ==================== AES 解密 ====================
 
-# ──────────────────────────────────────────────
-#  CDP m3u8 嗅探器（对齐油猴 PerformanceObserver + GM_webRequest）
-# ──────────────────────────────────────────────
-class M3U8Sniffer:
-    """
-    用 Selenium CDP 监听所有网络请求，捕获媒体资源 URL。
-    对应油猴脚本的嗅探来源：
-      - PerformanceObserver（resource 条目）→ CDP Network.responseReceived
-      - GM_webRequest（*.m3u8*）          → CDP Network.requestWillBeSent
-      - <video> / <audio> / <source>       → 每秒扫描 DOM
-    """
+def decrypt_aes_key(key_url: str, iv: bytes, data: bytes, headers: dict = None) -> bytes:
+    """AES-128 解密"""
+    if not AES:
+        raise ImportError("pycryptodome 未安装，请运行: pip install pycryptodome")
+    
+    # 获取 key
+    key_content = get_content(key_url, headers=headers)
+    if not key_content:
+        raise Exception(f"无法获取 key: {key_url}")
+    
+    # 可能是 hex 或 base64
+    try:
+        key = bytes.fromhex(key_content)
+    except ValueError:
+        key = base64.b64decode(key_content)
+    
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(data)
+    return decrypted
 
-    def __init__(self, driver):
-        self.driver = driver
-        self._found: list[dict] = []   # [{url, type, mime}, ...]
-        self._lock  = threading.Lock()
-        self._have_listener = False
-        self._dom_timer: threading.Timer | None = None
+# ==================== M3U8 解析器 ====================
 
-    def start(self):
-        self._found.clear()
-        self.driver.execute_cdp_cmd("Network.enable", {})
-        self.driver.execute_cdp_cmd(
-            "Network.setExtraHTTPHeaders",
-            {"headers": {"Referer": BASE_URL}}
-        )
+class M3U8Parser:
+    """M3U8 解析器"""
+    
+    def __init__(self, m3u8_url: str, headers: dict = None):
+        self.m3u8_url = m3u8_url
+        self.base_url = m3u8_url.rsplit('/', 1)[0] if '/' in m3u8_url else m3u8_url
+        self.headers = headers or {}
+        self.segments: List[str] = []
+        self.key_url: Optional[str] = None
+        self.iv: Optional[bytes] = None
+        self.is_encrypted = False
+        self.is_master_playlist = False
+        self.sub_streams: Dict[str, str] = {}  # 分辨率 -> 子流 URL
+    
+    def parse(self) -> bool:
+        """解析 m3u8 文件"""
+        content = get_content(self.m3u8_url, headers=self.headers)
+        if not content:
+            logger.error(f"无法获取 m3u8: {self.m3u8_url}")
+            return False
+        
+        # 检查是否是 master playlist
+        if '#EXT-X-STREAM-INF:' in content:
+            self.is_master_playlist = True
+            self._parse_master(content)
+        else:
+            self._parse_media(content)
+        
+        return True
+    
+    def _parse_master(self, content: str):
+        """解析 master playlist，选择最高分辨率"""
+        pattern = r'#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+)x(\d+).*?\n(.*?)\n'
+        matches = re.findall(pattern, content)
+        
+        for width, height, url in matches:
+            resolution = int(width) * int(height)
+            self.sub_streams[resolution] = url
+            logger.info(f"发现子流: {width}x{height} -> {url}")
+        
+        if self.sub_streams:
+            # 选择最高分辨率
+            best_resolution = max(self.sub_streams.keys())
+            best_url = self.sub_streams[best_resolution]
+            logger.info(f"选择最高分辨率: {best_resolution} -> {best_url}")
+            
+            # 解析子流
+            sub_parser = M3U8Parser(self._resolve_url(best_url), self.headers)
+            if sub_parser.parse():
+                self.segments = sub_parser.segments
+                self.key_url = sub_parser.key_url
+                self.iv = sub_parser.iv
+                self.is_encrypted = sub_parser.is_encrypted
+    
+    def _parse_media(self, content: str):
+        """解析 media playlist"""
+        lines = content.strip().split('\n')
+        current_iv = None
+        
+        for line in lines:
+            line = line.strip()
+            
+            # 解析 KEY
+            if line.startswith('#EXT-X-KEY:'):
+                self.is_encrypted = True
+                # URI="..."
+                uri_match = re.search(r'URI="([^"]+)"', line)
+                if uri_match:
+                    self.key_url = self._resolve_url(uri_match.group(1))
+                # IV=0x...
+                iv_match = re.search(r'IV=0x([0-9a-fA-F]+)', line)
+                if iv_match:
+                    current_iv = bytes.fromhex(iv_match.group(1))
+            
+            # 切片 URL
+            elif not line.startswith('#') and line:
+                segment_url = self._resolve_url(line)
+                self.segments.append((segment_url, current_iv))
+    
+    def _resolve_url(self, url: str) -> str:
+        """解析相对 URL"""
+        if url.startswith('http'):
+            return url
+        elif url.startswith('/'):
+            parsed = urlparse(self.m3u8_url)
+            return f"{parsed.scheme}://{parsed.netloc}{url}"
+        else:
+            return f"{self.base_url}/{url}"
+
+# ==================== TS 下载器 ====================
+
+class TSDownloader:
+    """TS 切片下载器"""
+    
+    def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path, 
+                 headers: dict = None, threads: int = 15, key_url: str = None):
+        self.segments = segments
+        self.output_file = output_file
+        self.headers = headers or {}
+        self.threads = threads
+        self.key_url = key_url
+        self.progress_callback = None
+        self.failed_segments = []
+    
+    def download(self, progress_callback=None) -> bool:
+        """并发下载并合并"""
+        self.progress_callback = progress_callback
+        
+        self.output_file.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = self.output_file.with_suffix('.ts.tmp')
+        
         try:
-            self.driver.add_cdp_listener("Network.responseReceived",  self._on_response)
-            self.driver.add_cdp_listener("Network.requestWillBeSent", self._on_request)
-            self._have_listener = True
-        except AttributeError:
-            self._have_listener = False
-
-        # 定期扫描 DOM 中的 video/audio/source 标签（对应油猴脚本逻辑）
-        self._start_dom_scan()
-
-    def stop(self):
-        if self._dom_timer:
-            self._dom_timer.cancel()
-            self._dom_timer = None
-        if self._have_listener:
-            try:
-                self.driver.remove_cdp_listener("Network.responseReceived",  self._on_response)
-                self.driver.remove_cdp_listener("Network.requestWillBeSent", self._on_request)
-            except Exception:
-                pass
-
-    # ── CDP 回调 ──────────────────────────────
-    def _on_response(self, params):
-        resp = params.get("response", {})
-        url  = resp.get("url", "")
-        mime = resp.get("mimeType", "")
-        self._add(url, mime)
-
-    def _on_request(self, params):
-        url = params.get("request", {}).get("url", "")
-        self._add(url)
-
-    def _add(self, url: str, mime: str = ""):
-        if not url or len(url) < 8:
-            return
-        t = classify_url(url, mime)
-        if t:
-            with self._lock:
-                existing = [f["url"] for f in self._found]
-                if url not in existing:
-                    log.info(f"  🎯 嗅探[{t}]: {url[:100]}")
-                    self._found.append({"url": url, "type": t, "mime": mime})
-
-    # ── DOM 扫描（对应油猴脚本 video/audio/source 扫描）──
-    def _start_dom_scan(self):
-        def _scan():
-            try:
-                # 提取 video[src], audio[src], source[src]
-                js = """
-                var res = [];
-                document.querySelectorAll('video[src],audio[src],source[src]').forEach(function(el){
-                    var s = el.getAttribute('src') || '';
-                    if(s && !s.startsWith('blob:') && !s.startsWith('data:')){
-                        res.push({tag: el.tagName.toLowerCase(), src: s});
+            with open(temp_file, 'wb') as f:
+                with ThreadPoolExecutor(max_workers=self.threads) as executor:
+                    # 提交下载任务
+                    future_to_index = {
+                        executor.submit(self._download_segment, idx, url, iv): idx
+                        for idx, (url, iv) in enumerate(self.segments)
                     }
-                });
-                return res;
-                """
-                items = self.driver.execute_script(js) or []
-                for item in items:
-                    src = item.get("src", "")
-                    if src and src.startswith("http"):
-                        tag = item.get("tag", "video")
-                        mime = "audio/mpeg" if tag == "audio" else ""
-                        self._add(src, mime)
-            except Exception:
-                pass
-            # 每 1.5 秒扫描一次
-            self._dom_timer = threading.Timer(1.5, _scan)
-            self._dom_timer.daemon = True
-            self._dom_timer.start()
-        _scan()
-
-    # ── 获取结果 ──────────────────────────────
-    def get_hls_urls(self) -> list[str]:
-        with self._lock:
-            return [f["url"] for f in self._found if f["type"] == "hls"]
-
-    def get_all(self) -> list[dict]:
-        with self._lock:
-            return list(self._found)
-
-    # ── 旧版 Selenium 兜底（performance log）─
-    def poll_perf_log(self) -> list[str]:
-        found = []
-        try:
-            for entry in self.driver.get_log("performance"):
-                try:
-                    msg = json.loads(entry["message"])["message"]
-                    if msg.get("method") in (
-                        "Network.responseReceived",
-                        "Network.requestWillBeSent",
-                    ):
-                        p    = msg.get("params", {})
-                        url  = (p.get("response", {}).get("url", "")
-                                or p.get("request", {}).get("url", ""))
-                        mime = p.get("response", {}).get("mimeType", "")
-                        t    = classify_url(url, mime)
-                        if t == "hls" and url not in found:
-                            found.append(url)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return found
-
-    def all_hls(self) -> list[str]:
-        r = self.get_hls_urls()
-        if not r:
-            r = self.poll_perf_log()
-        return r
-
-
-# ──────────────────────────────────────────────
-#  m3u8 解析器（完整对齐油猴脚本逻辑）
-# ──────────────────────────────────────────────
-class M3U8Processor:
-    """
-    对应油猴脚本 m3u8Download() 函数，完整实现：
-    1. 下载并解析 m3u8 文本
-    2. 嵌套 m3u8 → 选最高分辨率子流递归处理
-    3. #EXT-X-KEY → AES-128 解密
-    4. #EXT-X-DISCONTINUITY → 广告过滤
-    5. 并发下载 ts 切片（对应 xcNum=15 线程）
-    6. 合并 ts → ffmpeg 封装 mp4
-    """
-
-    def __init__(self, ffmpeg_path: str, headers: dict, stop_event: threading.Event,
-                 filter_ads: bool = True):
-        self.ffmpeg     = ffmpeg_path
-        self.headers    = headers
-        self.stop_event = stop_event
-        self.filter_ads = filter_ads
-
-    def _http_get(self, url: str, binary: bool = False):
-        """简单 HTTP GET，带 Referer 头"""
-        req = urllib.request.Request(url, headers=self.headers)
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read() if binary else resp.read().decode("utf-8", errors="replace")
-
-    # ── 相对 URL 还原（对齐油猴脚本多种格式处理）──
-    @staticmethod
-    def _resolve_url(ts_path: str, m3u8_url: str, page_url: str) -> str:
-        if ts_path.startswith("http://") or ts_path.startswith("https://"):
-            return ts_path
-        # //domain/path 形式
-        if ts_path.startswith("//"):
-            scheme = urlparse(page_url).scheme or "https"
-            return f"{scheme}:{ts_path}"
-        # /path 形式（绝对路径）
-        if ts_path.startswith("/"):
-            base = urlparse(m3u8_url)
-            return f"{base.scheme}://{base.netloc}{ts_path}"
-        # 相对路径
-        base_dir = m3u8_url.split("?")[0].rsplit("/", 1)[0]
-        return f"{base_dir}/{ts_path}"
-
-    # ── 广告过滤（对应 #EXT-X-DISCONTINUITY 段落删除）──
-    @staticmethod
-    def _filter_ads(text: str) -> str:
-        """移除 #EXT-X-DISCONTINUITY 包裹的广告片段"""
-        while "#EXT-X-DISCONTINUITY" in text.upper():
-            # 找第一个 DISCONTINUITY
-            m1 = re.search(r'#EXT-X-DISCONTINUITY', text, re.IGNORECASE)
-            if not m1:
-                break
-            # 标记第一个，找第二个
-            tmp = text[:m1.start()] + "###MARK###" + text[m1.end():]
-            m2 = re.search(r'#EXT-X-DISCONTINUITY', tmp, re.IGNORECASE)
-            if m2:
-                # 删除 mark 到第二个 DISCONTINUITY+20 之间的内容
-                text = tmp[:tmp.index("###MARK###")] + tmp[m2.end():]
-            else:
-                # 只有一个，删到结尾
-                text = text[:m1.start()]
-            if "#EXT-X-DISCONTINUITY" not in text.upper():
-                break
-        return text
-
-    # ── 解析 m3u8 文本，返回 ts URL 列表 ────
-    def _parse_m3u8(self, text: str, m3u8_url: str, page_url: str) -> tuple[list[str], str, Optional[str]]:
-        """
-        返回 (ts_url_list, key_url_or_none, iv_or_none)
-        key_url: AES-128 密钥 URL
-        iv: 十六进制 IV 字符串
-        """
-        if self.filter_ads:
-            text = self._filter_ads(text)
-
-        # 检测是否嵌套 m3u8（master playlist）
-        # 油猴脚本通过 #EXT-X-TARGETDURATION 判断是否为媒体 playlist
-        has_target_duration = bool(re.search(r'#EXT-X-TARGETDURATION', text, re.IGNORECASE))
-
-        if not has_target_duration:
-            # 这是 master playlist，选最高分辨率子流
-            log.info("  检测到 master playlist，选取最高分辨率子流...")
-            best_url = self._select_best_stream(text, m3u8_url, page_url)
-            if best_url:
-                sub_text = self._http_get(best_url)
-                return self._parse_m3u8(sub_text, best_url, page_url)
-
-        # 媒体 playlist：提取 ts 列表
-        key_url, iv = self._extract_key(text, m3u8_url, page_url)
-
-        # 去掉非 EXTINF 行，只保留时间戳+URL对
-        cleaned = re.sub(r'^#(?!(EXTINF[^\n]*|EXT-X-STREAM-INF[^\n]*))[^\n]*', '',
-                         text, flags=re.MULTILINE)
-        segments = re.findall(r'#EXTINF[^\n]*\n([^\n#]+)', cleaned)
-
-        ts_list = []
-        for seg in segments:
-            seg = seg.strip()
-            if seg:
-                ts_list.append(self._resolve_url(seg, m3u8_url, page_url))
-
-        log.info(f"  解析到 {len(ts_list)} 个 ts 切片"
-                 + (", AES-128 加密" if key_url else ""))
-        return ts_list, key_url, iv
-
-    @staticmethod
-    def _select_best_stream(text: str, m3u8_url: str, page_url: str) -> Optional[str]:
-        """从 master playlist 选最高分辨率子流（对应油猴脚本的 maxP/maxUrl 逻辑）"""
-        best_pixels = -1
-        best_url    = None
-
-        # 匹配 #EXT-X-STREAM-INF 或 #EXT-X-IFRAME-STREAM-INF
-        for block in re.split(r'(#EXT-X-STREAM-INF[^\n]*)', text):
-            block = block.strip()
-            if not block or block.startswith("#"):
-                continue
-            # block 是 URI 行
-            uri_line = block.split("\n")[0].strip()
-            if not uri_line or uri_line.startswith("#"):
-                continue
-
-            # 找上一行的 RESOLUTION
-            lines = text.split("\n")
-            for i, line in enumerate(lines):
-                if uri_line in line and i > 0:
-                    meta = lines[i - 1]
-                    res_m = re.search(r'RESOLUTION=(\d+)[xX×](\d+)', meta)
-                    if res_m:
-                        pixels = int(res_m.group(1)) * int(res_m.group(2))
-                        if pixels > best_pixels:
-                            best_pixels = pixels
-                            best_url    = uri_line
-                    elif best_url is None:
-                        best_url = uri_line
-                    break
-
-        if best_url:
-            # 还原 URL
-            if not best_url.startswith("http"):
-                base_dir = m3u8_url.split("?")[0].rsplit("/", 1)[0]
-                best_url = f"{base_dir}/{best_url}"
-            log.info(f"  选定子流: {best_url[:80]} ({best_pixels}px)")
-
-        return best_url
-
-    def _extract_key(self, text: str, m3u8_url: str, page_url: str):
-        """提取 AES-128 加密 key URL 和 IV（对应油猴脚本 #EXT-X-KEY 解析）"""
-        key_match = re.search(r'#EXT-X-KEY[^\n]*', text, re.IGNORECASE)
-        if not key_match:
-            return None, None
-
-        line = key_match.group(0)
-        method_m = re.search(r'METHOD=([\w-]+)', line)
-        if not method_m or method_m.group(1).upper() in ("NONE", ""):
-            return None, None
-
-        uri_m = re.search(r'URI="([^"]+)"', line)
-        if not uri_m:
-            return None, None
-
-        key_url = uri_m.group(1)
-        if not key_url.startswith("http"):
-            key_url = self._resolve_url(key_url, m3u8_url, page_url)
-
-        iv_m = re.search(r'IV=0x([\dA-Fa-f]+)', line)
-        iv   = iv_m.group(1) if iv_m else None
-
-        return key_url, iv
-
-    # ── AES-128 解密（对应油猴脚本 jiemi() 函数）──
-    @staticmethod
-    def _decrypt_ts(data: bytes, key_bytes: bytes, iv_hex: Optional[str]) -> bytes:
-        try:
-            from Crypto.Cipher import AES
-            iv = bytes.fromhex(iv_hex) if iv_hex else key_bytes[:16]
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv)
-            return cipher.decrypt(data)
-        except ImportError:
-            log.warning("  pycryptodome 未安装，跳过解密（pip install pycryptodome）")
-            return data
-
-    # ── 并发下载 ts 切片（对应油猴脚本 xcNum=15 线程）──
-    def _download_ts_list(self, ts_list: list[str]) -> list[Optional[bytes]]:
-        results = [None] * len(ts_list)
-        done    = 0
-        total   = len(ts_list)
-
-        def _dl(i, url):
-            for attempt in range(3):
-                if self.stop_event.is_set():
-                    return
-                try:
-                    data = self._http_get(url, binary=True)
-                    results[i] = data
-                    return
-                except Exception as e:
-                    log.warning(f"  ts[{i}] 第{attempt+1}次失败: {e}")
-                    time.sleep(1)
-            log.error(f"  ts[{i}] 彻底失败，跳过: {url[:60]}")
-
-        with ThreadPoolExecutor(max_workers=TS_THREADS) as pool:
-            futures = {pool.submit(_dl, i, url): i for i, url in enumerate(ts_list)}
-            for fut in as_completed(futures):
-                done += 1
-                if done % 10 == 0 or done == total:
-                    pct = done / total * 100
-                    log.info(f"  ts 下载进度: {done}/{total} ({pct:.0f}%)")
-                if self.stop_event.is_set():
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    break
-
-        return results
-
-    # ── 主入口：m3u8 → mp4 ───────────────────
-    def process(self, m3u8_url: str, out_path: Path, page_url: str = BASE_URL) -> bool:
-        """完整流程：下载 → 解析 → 并发下载 ts → 合并 → ffmpeg 封装"""
-        log.info(f"  [m3u8] 开始处理: {m3u8_url[:80]}")
-        try:
-            m3u8_text = self._http_get(m3u8_url)
+                    
+                    # 按顺序写入
+                    results = [None] * len(self.segments)
+                    for future in as_completed(future_to_index):
+                        idx = future_to_index[future]
+                        try:
+                            results[idx] = future.result()
+                            logger.debug(f"切片 {idx+1}/{len(self.segments)} 完成")
+                        except Exception as e:
+                            logger.error(f"切片 {idx+1} 失败: {e}")
+                            self.failed_segments.append(idx+1)
+                        
+                        # 进度回调
+                        completed = sum(1 for r in results if r is not None)
+                        if self.progress_callback:
+                            self.progress_callback(completed, len(self.segments))
+                    
+                    # 写入
+                    for data in results:
+                        if data:
+                            f.write(data)
+            
+            logger.info(f"下载完成，临时文件: {temp_file}")
+            
+            # 转 MP4
+            return self._convert_to_mp4(temp_file)
+        
         except Exception as e:
-            log.error(f"  [m3u8] 下载 m3u8 失败: {e}")
-            # 兜底：直接用 ffmpeg 下载（处理带 token 等鉴权参数的情况）
-            return self._ffmpeg_direct(m3u8_url, out_path, page_url)
-
-        try:
-            ts_list, key_url, iv = self._parse_m3u8(m3u8_text, m3u8_url, page_url)
-        except Exception as e:
-            log.error(f"  [m3u8] 解析失败: {e}，改用 ffmpeg 直接下载")
-            return self._ffmpeg_direct(m3u8_url, out_path, page_url)
-
-        if not ts_list:
-            log.warning("  [m3u8] 未解析到 ts 切片，改用 ffmpeg 直接下载")
-            return self._ffmpeg_direct(m3u8_url, out_path, page_url)
-
-        # 下载 AES 密钥
-        key_bytes = None
-        if key_url:
+            logger.error(f"下载失败: {e}")
+            return False
+    
+    def _download_segment(self, idx: int, url: str, iv: Optional[bytes]) -> Optional[bytes]:
+        """下载单个切片"""
+        if not requests:
+            raise ImportError("requests 未安装")
+        
+        resp = requests.get(url, headers=self.headers, timeout=30)
+        if resp.status_code != 200:
+            raise Exception(f"HTTP {resp.status_code}")
+        
+        data = resp.content
+        
+        # 解密
+        if self.key_url and iv:
             try:
-                key_bytes = self._http_get(key_url, binary=True)
-                log.info("  [m3u8] AES-128 密钥已下载，启用解密")
+                data = decrypt_aes_key(self.key_url, iv, data, self.headers)
             except Exception as e:
-                log.warning(f"  [m3u8] 密钥下载失败，尝试无解密下载: {e}")
-
-        # 并发下载所有 ts 切片
-        log.info(f"  [m3u8] 开始并发下载 {len(ts_list)} 个切片 (线程数: {TS_THREADS})")
-        chunks = self._download_ts_list(ts_list)
-
-        if self.stop_event.is_set():
-            return False
-
-        # 解密 + 合并
-        tmp_ts = out_path.with_suffix(".tmp.ts")
+                logger.error(f"解密失败: {e}")
+        
+        return data
+    
+    def _convert_to_mp4(self, ts_file: Path) -> bool:
+        """用 ffmpeg 转换为 MP4"""
         try:
-            with open(tmp_ts, "wb") as f:
-                ok_count = 0
-                for i, chunk in enumerate(chunks):
-                    if chunk is None:
-                        log.warning(f"  ts[{i}] 缺失，跳过")
-                        continue
-                    if key_bytes:
-                        chunk = self._decrypt_ts(chunk, key_bytes, iv)
-                    f.write(chunk)
-                    ok_count += 1
-            log.info(f"  [m3u8] 合并完成: {ok_count}/{len(ts_list)} 切片 → {tmp_ts.name}")
-        except Exception as e:
-            log.error(f"  [m3u8] 合并失败: {e}")
-            return False
-
-        # ffmpeg 封装 ts → mp4
-        ok = self._ffmpeg_remux(str(tmp_ts), str(out_path))
-        try:
-            tmp_ts.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return ok
-
-    def _ffmpeg_direct(self, m3u8_url: str, out_path: Path, referer: str) -> bool:
-        """直接用 ffmpeg 下载 m3u8（鉴权 token 场景的兜底方案）"""
-        cmd = [
-            self.ffmpeg, "-y",
-            "-headers",
-            f"Referer: {referer}\r\nUser-Agent: Mozilla/5.0\r\n",
-            "-i", m3u8_url,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-loglevel", "warning",
-            str(out_path),
-        ]
-        log.info(f"  [ffmpeg direct] 封装: {out_path.name}")
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-            if r.returncode == 0:
-                size = out_path.stat().st_size / 1024 / 1024 if out_path.exists() else 0
-                log.info(f"  [ffmpeg] ✓ {size:.1f} MB")
-                return True
-            log.error(f"  [ffmpeg] 失败 (exit {r.returncode})\n{r.stderr[-600:]}")
-            return False
-        except FileNotFoundError:
-            log.error("  [ffmpeg] 找不到 ffmpeg！请在「设置」页指定路径。")
-            return False
-
-    def _ffmpeg_remux(self, ts_path: str, mp4_path: str) -> bool:
-        """ffmpeg ts → mp4 封装（-c copy）"""
-        cmd = [
-            self.ffmpeg, "-y",
-            "-i", ts_path,
-            "-c", "copy",
-            "-movflags", "+faststart",
-            "-loglevel", "warning",
-            mp4_path,
-        ]
-        log.info(f"  [ffmpeg] ts → mp4: {Path(mp4_path).name}")
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace")
-            if r.returncode == 0:
-                size = Path(mp4_path).stat().st_size / 1024 / 1024 if Path(mp4_path).exists() else 0
-                log.info(f"  [ffmpeg] ✓ {size:.1f} MB → {mp4_path}")
-                return True
-            log.error(f"  [ffmpeg] 失败 (exit {r.returncode})\n{r.stderr[-600:]}")
-            return False
-        except FileNotFoundError:
-            log.error("  [ffmpeg] 找不到 ffmpeg！")
-            return False
-
-
-# ──────────────────────────────────────────────
-#  CrawlerCore：对外接口（供 GUI / 命令行调用）
-# ──────────────────────────────────────────────
-class CrawlerCore:
-    def __init__(
-        self,
-        output_dir:  str = "downloads",
-        ffmpeg_path: Optional[str] = None,
-        headless:    bool = True,
-        sniff_wait:  int  = 15,
-        proxy:       dict = None,
-        stop_event:  threading.Event = None,
-        progress_cb: Callable = None,   # (current, total, title) -> None
-        filter_ads:  bool = True,
-    ):
-        self.output_dir  = Path(output_dir)
-        self.ffmpeg_path = ffmpeg_path or self._find_ffmpeg()
-        self.headless    = headless
-        self.sniff_wait  = sniff_wait
-        self.proxy       = proxy or {}
-        self.stop_event  = stop_event or threading.Event()
-        self.progress_cb = progress_cb
-        self.filter_ads  = filter_ads
-        self._driver     = None
-        self._sniffer: Optional[M3U8Sniffer] = None
-
-        self._req_headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer": BASE_URL,
-        }
-
-    @staticmethod
-    def _find_ffmpeg() -> str:
-        candidates = [
-            str(Path(__file__).parent / "ffmpeg" / "ffmpeg.exe"),
-            str(Path(__file__).parent / "ffmpeg" / "ffmpeg"),
-            "ffmpeg",
-        ]
-        for p in candidates:
-            try:
-                r = subprocess.run([p, "-version"], capture_output=True, timeout=5)
-                if r.returncode == 0:
-                    return p
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
-        return "ffmpeg"
-
-    def _make_dir(self, title: str) -> Path:
-        d = self.output_dir / today_str() / safe_filename(title)
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    # ── 浏览器生命周期 ─────────────────────────
-    def _start_driver(self):
-        from selenium import webdriver
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
-
-        opts = Options()
-        if self.headless:
-            opts.add_argument("--headless=new")
-        opts.add_argument("--no-sandbox")
-        opts.add_argument("--disable-dev-shm-usage")
-        opts.add_argument("--disable-gpu")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_argument("--window-size=1280,800")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        opts.add_experimental_option("useAutomationExtension", False)
-        opts.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-        if self.proxy.get("socks5"):
-            opts.add_argument(f"--proxy-server={self.proxy['socks5']}")
-            log.info(f"已启用代理: {self.proxy['socks5']}")
-
-        try:
-            from webdriver_manager.chrome import ChromeDriverManager
-            service = Service(ChromeDriverManager().install())
-        except ImportError:
-            service = Service()
-
-        self._driver = webdriver.Chrome(service=service, options=opts)
-        self._driver.execute_cdp_cmd(
-            "Page.addScriptToEvaluateOnNewDocument",
-            {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"}
-        )
-        self._sniffer = M3U8Sniffer(self._driver)
-
-    def _quit_driver(self):
-        if self._sniffer:
-            self._sniffer.stop()
-        if self._driver:
-            try:
-                self._driver.quit()
-            except Exception:
-                pass
-        self._driver  = None
-        self._sniffer = None
-
-    # ── 标题提取 ───────────────────────────────
-    @staticmethod
-    def _get_title(driver, fallback: str = "untitled") -> str:
-        try:
-            t = driver.title.strip()
-            t = re.split(r'\s*[-–|]\s*好色', t)[0].strip()
-            if t:
-                return t
-        except Exception:
-            pass
-        try:
-            from selenium.webdriver.common.by import By
-            h1 = driver.find_element(By.TAG_NAME, "h1")
-            t  = h1.text.strip()
-            if t:
-                return t
-        except Exception:
-            pass
-        return fallback
-
-    # ── 嗅探单页核心 ───────────────────────────
-    def _sniff_page(self, url: str, hint_title: str = "",
-                    skip_existing: bool = True) -> bool:
-        if self.stop_event.is_set():
-            return False
-
-        log.info(f"▶ {url}")
-        self._sniffer.start()
-        self._driver.get(url)
-
-        # 等待嗅探（最多 sniff_wait 秒，捕获到 m3u8 后提前退出）
-        deadline = time.time() + self.sniff_wait
-        while time.time() < deadline:
-            if self.stop_event.is_set():
-                self._sniffer.stop()
+            # 检查 ffmpeg
+            result = subprocess.run(
+                ["ffmpeg", "-version"],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                logger.error("ffmpeg 未安装或不在 PATH 中")
                 return False
-            if self._sniffer.get_hls_urls():
-                elapsed = self.sniff_wait - (deadline - time.time())
-                log.info(f"  已捕获 m3u8，嗅探耗时 {elapsed:.1f}s")
-                break
-            time.sleep(0.4)
-
-        self._sniffer.stop()
-
-        hls_list = self._sniffer.all_hls()
-        if not hls_list:
-            log.warning("  ✗ 未嗅探到 m3u8，跳过")
+            
+            # 转换
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(ts_file),
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                str(self.output_file)
+            ]
+            
+            logger.info(f"执行: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logger.info(f"转换成功: {self.output_file}")
+                ts_file.unlink()  # 删除临时文件
+                return True
+            else:
+                logger.error(f"转换失败: {result.stderr}")
+                return False
+        
+        except FileNotFoundError:
+            logger.error("ffmpeg 未安装")
+            return False
+        except Exception as e:
+            logger.error(f"转换异常: {e}")
             return False
 
-        m3u8_url = hls_list[0]
-        title    = self._get_title(self._driver, fallback=hint_title or "untitled")
-        log.info(f"  标题: {title}")
+# ==================== 爬虫核心 ====================
 
-        out_dir  = self._make_dir(title)
-        mp4_path = out_dir / (safe_filename(title) + ".mp4")
-
-        if skip_existing and mp4_path.exists() and mp4_path.stat().st_size > 10240:
-            log.info(f"  已存在，跳过")
+class CrawlerCore:
+    """爬虫核心类"""
+    
+    BASE_URL = "https://ml0987.xyz"
+    
+    def __init__(self, config: dict, log_callback=None, progress_callback=None):
+        self.config = config
+        self.log_callback = log_callback
+        self.progress_callback = progress_callback
+        self.driver = None
+        self._stop_flag = False
+    
+    def _log(self, message: str, level: str = "info"):
+        """日志回调"""
+        logger.log(logging.getLevelName(level.upper()), message)
+        if self.log_callback:
+            self.log_callback(message, level)
+    
+    def _progress(self, current: int, total: int):
+        """进度回调"""
+        if self.progress_callback:
+            self.progress_callback(current, total)
+    
+    def stop(self):
+        """停止爬虫"""
+        self._stop_flag = True
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+    
+    # ==================== 浏览器控制 ====================
+    
+    def _create_driver(self):
+        """创建 Chrome Driver"""
+        if not webdriver:
+            raise ImportError("selenium 未安装")
+        
+        options = Options()
+        
+        # 无头模式
+        if self.config.get("headless", True):
+            options.add_argument("--headless=new")
+        
+        # 禁用一些不必要的功能
+        options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # User-Agent
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # 代理
+        if self.config.get("proxy_enabled"):
+            host = self.config.get("proxy_host", "127.0.0.1")
+            port = self.config.get("proxy_port", "1080")
+            user = self.config.get("proxy_user", "")
+            password = self.config.get("proxy_pass", "")
+            
+            if user and password:
+                options.add_argument(f"--proxy-server=socks5://{user}:{password}@{host}:{port}")
+            else:
+                options.add_argument(f"--proxy-server=socks5://{host}:{port}")
+            
+            self._log(f"使用代理: {host}:{port}")
+        
+        # 创建 Service
+        service = None
+        if ChromeDriverManager:
+            try:
+                service = Service(ChromeDriverManager().install())
+            except:
+                self._log("webdriver-manager 自动下载失败，尝试使用系统 chromedriver", "warn")
+        
+        try:
+            self.driver = webdriver.Chrome(service=service, options=options)
+            self.driver.set_page_load_timeout(30)
+            self._log("Chrome 启动成功")
+        except Exception as e:
+            self._log(f"Chrome 启动失败: {e}", "error")
+            raise
+    
+    def _quit_driver(self):
+        """关闭浏览器"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.driver = None
+            except:
+                pass
+    
+    # ==================== 网络嗅探 ====================
+    
+    def _sniff_m3u8(self, url: str, wait_time: int = 15) -> Optional[str]:
+        """嗅探 m3u8 URL"""
+        self._log(f"正在嗅探: {url}")
+        
+        self._create_driver()
+        
+        try:
+            self.driver.get(url)
+            
+            # 等待页面加载
+            time.sleep(2)
+            
+            # 通过 CDP 获取网络日志
+            logs = self.driver.get_log("performance")
+            
+            # 等待一段时间，让播放器加载
+            start_time = time.time()
+            while time.time() - start_time < wait_time and not self._stop_flag:
+                time.sleep(0.5)
+                logs = self.driver.get_log("performance")
+                
+                for log in logs:
+                    try:
+                        message = json.loads(log["message"])["message"]
+                        if message["method"] == "Network.responseReceived":
+                            url = message["params"]["response"]["url"]
+                            if ".m3u8" in url:
+                                self._log(f"发现 m3u8: {url}")
+                                return url
+                    except:
+                        pass
+            
+            self._log("未发现 m3u8 请求", "warn")
+            return None
+        
+        except TimeoutException:
+            self._log("页面加载超时", "error")
+            return None
+        except Exception as e:
+            self._log(f"嗅探失败: {e}", "error")
+            return None
+        finally:
+            self._quit_driver()
+    
+    # ==================== 单视频下载 ====================
+    
+    def download_single(self, url: str, title: str = None, output_dir: Path = None) -> bool:
+        """下载单个视频"""
+        if self._stop_flag:
+            return False
+        
+        # 嗅探 m3u8
+        m3u8_url = self._sniff_m3u8(url)
+        if not m3u8_url:
+            self._log("未找到 m3u8 地址", "error")
+            return False
+        
+        # 解析 m3u8
+        self._log("解析 m3u8...")
+        parser = M3U8Parser(m3u8_url)
+        if not parser.parse():
+            self._log("m3u8 解析失败", "error")
+            return False
+        
+        # 获取标题
+        if not title:
+            title = f"视频_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # 创建输出目录
+        if not output_dir:
+            output_dir = Path(self.config.get("output_dir", "downloads"))
+        
+        # 按日期分类
+        date_dir = output_dir / datetime.now().strftime("%Y-%m-%d")
+        title_dir = date_dir / sanitize_filename(title)
+        mp4_file = title_dir / f"{sanitize_filename(title)}.mp4"
+        
+        # 检查是否已存在
+        if mp4_file.exists():
+            self._log(f"文件已存在: {mp4_file}", "warn")
             return True
-
-        # 用完整 m3u8 处理器下载转码
-        processor = M3U8Processor(
-            ffmpeg_path=self.ffmpeg_path,
-            headers=self._req_headers,
-            stop_event=self.stop_event,
-            filter_ads=self.filter_ads,
+        
+        # 下载切片
+        self._log(f"开始下载: {len(parser.segments)} 个切片")
+        downloader = TSDownloader(
+            parser.segments,
+            mp4_file,
+            headers={},
+            threads=15,
+            key_url=parser.key_url
         )
-        return processor.process(m3u8_url, mp4_path, page_url=url)
-
-    # ── 列表页解析 ─────────────────────────────
-    def _parse_list_page(self, page_url: str) -> list[dict]:
-        from bs4 import BeautifulSoup
-        log.info(f"  列表页: {page_url}")
-        self._driver.get(page_url)
-        time.sleep(2)
-
-        soup   = BeautifulSoup(self._driver.page_source, "html.parser")
-        videos, seen = [], set()
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if not re.search(r'video-\d+\.htm', href):
+        
+        success = downloader.download(progress_callback=lambda c, t: self._progress(c, t))
+        
+        if success:
+            self._log(f"下载完成: {mp4_file}")
+        else:
+            self._log("下载失败", "error")
+        
+        return success
+    
+    # ==================== 批量爬取 ====================
+    
+    def crawl_batch(self, page_start: int, page_end: int, list_type: str = "list") -> int:
+        """批量爬取"""
+        total_success = 0
+        
+        for page in range(page_start, page_end + 1):
+            if self._stop_flag:
+                break
+            
+            self._log(f"正在爬取第 {page} 页...")
+            
+            # 构造列表页 URL
+            if list_type == "list":
+                list_url = f"{self.BASE_URL}/list_{page}.htm"
+            elif list_type == "hot":
+                list_url = f"{self.BASE_URL}/hot_{page}.htm"
+            else:
+                self._log(f"未知列表类型: {list_type}", "error")
+                break
+            
+            # 获取视频链接
+            video_urls = self._extract_video_urls(list_url)
+            if not video_urls:
+                self._log(f"第 {page} 页未发现视频", "warn")
                 continue
-            full = urljoin(BASE_URL, href)
-            if full in seen:
-                continue
-            seen.add(full)
-            title = ""
-            for tag in ["h2", "h3", "p"]:
-                el = a.find(tag)
-                if el and el.get_text(strip=True):
-                    title = el.get_text(strip=True)
+            
+            self._log(f"发现 {len(video_urls)} 个视频")
+            
+            # 下载每个视频
+            for idx, url in enumerate(video_urls, 1):
+                if self._stop_flag:
                     break
-            if not title:
-                title = a.get("title", "") or a.get_text(" ", strip=True)
-            videos.append({"title": title.strip() or "untitled", "url": full})
-
-        log.info(f"  找到 {len(videos)} 个视频")
-        return videos
-
-    # ── 公开方法：批量爬取 ─────────────────────
-    def crawl_list(self, list_type: str = "list",
-                   start: int = 1, end: int = 3):
-        done = load_progress()
-        log.info(f"已有进度 {len(done)} 条")
-        self._start_driver()
+                
+                self._log(f"[{idx}/{len(video_urls)}] 下载: {url}")
+                
+                # 嗅探标题（简化）
+                title = f"第{page}页_第{idx}个"
+                
+                if self.download_single(url, title):
+                    total_success += 1
+                
+                # 间隔
+                time.sleep(2)
+        
+        self._log(f"批量爬取完成，成功: {total_success} 个")
+        return total_success
+    
+    def _extract_video_urls(self, list_url: str) -> List[str]:
+        """提取视频链接"""
+        if not requests:
+            return []
+        
         try:
-            all_videos = []
-            for n in range(start, end + 1):
-                if self.stop_event.is_set():
-                    break
-                prefix = "hot_list" if list_type == "hot" else "list"
-                vids   = self._parse_list_page(f"{BASE_URL}/{prefix}-{n}.htm")
-                if not vids:
-                    log.info(f"第 {n} 页无数据，停止")
-                    break
-                all_videos.extend(vids)
-                time.sleep(1.5)
-
-            log.info(f"共发现 {len(all_videos)} 个视频")
-            ok_count = 0
-            for i, v in enumerate(all_videos, 1):
-                if self.stop_event.is_set():
-                    log.info("任务已停止")
-                    break
-                if v["url"] in done:
-                    log.info(f"[{i}/{len(all_videos)}] 跳过: {v['url']}")
-                    if self.progress_cb:
-                        self.progress_cb(i, len(all_videos), "跳过: " + v["title"])
-                    continue
-                if self.progress_cb:
-                    self.progress_cb(i, len(all_videos), v["title"])
-                log.info(f"[{i}/{len(all_videos)}]")
-                ok = self._sniff_page(v["url"], v["title"])
-                if ok:
-                    done.add(v["url"])
-                    ok_count += 1
-                    save_progress(done)
-                time.sleep(1.5)
-            log.info(f"完成！成功 {ok_count}/{len(all_videos)}")
-        finally:
-            self._quit_driver()
-
-    # ── 公开方法：单视频 ───────────────────────
-    def process_single(self, url: str, skip_existing: bool = True) -> bool:
-        self._start_driver()
-        try:
-            return self._sniff_page(url, skip_existing=skip_existing)
-        finally:
-            self._quit_driver()
-
-    # ── 公开方法：直接 m3u8 下载 ───────────────
-    def download_m3u8_direct(self, m3u8_url: str, title: str = "video") -> bool:
-        out_dir  = self._make_dir(title)
-        mp4_path = out_dir / (safe_filename(title) + ".mp4")
-        processor = M3U8Processor(
-            ffmpeg_path=self.ffmpeg_path,
-            headers=self._req_headers,
-            stop_event=self.stop_event,
-            filter_ads=self.filter_ads,
-        )
-        return processor.process(m3u8_url, mp4_path)
-
-
-# ──────────────────────────────────────────────
-#  命令行模式
-# ──────────────────────────────────────────────
-if __name__ == "__main__":
-    import argparse
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.StreamHandler()]
-    )
-    p = argparse.ArgumentParser(description="爬虫核心（命令行模式）")
-    p.add_argument("url",      help="视频页 URL 或 m3u8 URL")
-    p.add_argument("--output", default="downloads")
-    p.add_argument("--ffmpeg", default="")
-    p.add_argument("--wait",   type=int, default=15)
-    p.add_argument("--show",   action="store_true")
-    p.add_argument("--proxy",  default="", help="socks5://host:port")
-    p.add_argument("--no-filter-ads", action="store_true")
-    args = p.parse_args()
-
-    proxy = {"socks5": args.proxy} if args.proxy else {}
-    core  = CrawlerCore(
-        output_dir=args.output,
-        ffmpeg_path=args.ffmpeg or None,
-        headless=not args.show,
-        sniff_wait=args.wait,
-        proxy=proxy,
-        filter_ads=not args.no_filter_ads,
-    )
-    if ".m3u8" in args.url:
-        core.download_m3u8_direct(args.url, "video")
-    else:
-        core.process_single(args.url)
+            resp = requests.get(list_url, timeout=10)
+            if resp.status_code != 200:
+                self._log(f"获取列表页失败: {resp.status_code}", "error")
+                return []
+            
+            # 简单正则提取
+            pattern = r'href="(video-\d+\.htm)"'
+            matches = re.findall(pattern, resp.text)
+            
+            # 补全 URL
+            urls = [f"{self.BASE_URL}/{m}" for m in matches]
+            return urls
+        
+        except Exception as e:
+            self._log(f"提取视频链接失败: {e}", "error")
+            return []

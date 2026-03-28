@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-ml0987.xyz 视频下载器 - GUI 版本
+ml0987 视频下载器 - GUI 版本
 """
 
 import os
@@ -24,6 +24,8 @@ except ImportError:
     print("错误: tkinter 不可用，请安装 Python 完整版")
     sys.exit(1)
 
+from crawler_core import CrawlerCore
+
 # ==================== 配置 ====================
 
 APP_DIR = Path(__file__).parent
@@ -40,6 +42,9 @@ DEFAULT_CONFIG = {
     "proxy_user": "",
     "proxy_pass": "",
     "headless": True,
+    "list_type": "list",
+    "page_start": 1,
+    "page_end": 3,
 }
 
 # ==================== 日志 ====================
@@ -86,6 +91,10 @@ class App:
         
         # 加载配置
         self.config = load_config()
+        
+        # 爬虫核心
+        self.crawler = None
+        self.crawl_thread = None
         
         # 创建 UI
         self._create_widgets()
@@ -146,20 +155,29 @@ class App:
         control_frame = ttk.LabelFrame(self.tab_crawl, text="爬取设置", padding=10)
         control_frame.pack(fill="x", padx=20, pady=10)
         
+        # 列表类型
+        type_frame = ttk.Frame(control_frame)
+        type_frame.pack(fill="x", pady=5)
+        ttk.Label(type_frame, text="列表类型:").pack(side="left")
+        self.list_type_var = tk.StringVar(value=self.config["list_type"])
+        ttk.Combobox(type_frame, textvariable=self.list_type_var, 
+                    values=["list", "hot"], width=10, state="readonly").pack(side="left", padx=5)
+        
         # 页码范围
         page_frame = ttk.Frame(control_frame)
         page_frame.pack(fill="x", pady=5)
         ttk.Label(page_frame, text="起始页码:").pack(side="left")
-        self.page_start_var = tk.IntVar(value=1)
+        self.page_start_var = tk.IntVar(value=self.config["page_start"])
         ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_start_var, width=5).pack(side="left", padx=5)
         ttk.Label(page_frame, text="结束页码:").pack(side="left")
-        self.page_end_var = tk.IntVar(value=3)
+        self.page_end_var = tk.IntVar(value=self.config["page_end"])
         ttk.Spinbox(page_frame, from_=1, to=100, textvariable=self.page_end_var, width=5).pack(side="left", padx=5)
         
         # 按钮
         btn_frame = ttk.Frame(self.tab_crawl)
         btn_frame.pack(fill="x", padx=20, pady=10)
         ttk.Button(btn_frame, text="🚀 开始爬取", command=self._start_crawl).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="🛑 停止", command=self._stop_crawl).pack(side="left", padx=5)
         
         # 进度显示
         progress_frame = ttk.LabelFrame(self.tab_crawl, text="进度", padding=10)
@@ -180,10 +198,18 @@ class App:
         self.url_var = tk.StringVar()
         ttk.Entry(url_frame, textvariable=self.url_var, width=60).pack(fill="x", padx=5, pady=5)
         
+        # 标题输入
+        title_frame = ttk.LabelFrame(self.tab_single, text="视频标题（可选）", padding=10)
+        title_frame.pack(fill="x", padx=20, pady=10)
+        
+        self.title_var = tk.StringVar()
+        ttk.Entry(title_frame, textvariable=self.title_var, width=60).pack(fill="x", padx=5, pady=5)
+        
         # 按钮
         btn_frame = ttk.Frame(self.tab_single)
         btn_frame.pack(fill="x", padx=20, pady=10)
         ttk.Button(btn_frame, text="🚀 开始下载", command=self._start_single).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="🛑 停止", command=self._stop_crawl).pack(side="left", padx=5)
         
         # 进度显示
         progress_frame = ttk.LabelFrame(self.tab_single, text="进度", padding=10)
@@ -221,6 +247,16 @@ class App:
         ttk.Label(proxy_frame, text="端口:").pack(anchor="w", padx=5)
         self.proxy_port_var = tk.StringVar(value=self.config["proxy_port"])
         ttk.Entry(proxy_frame, textvariable=self.proxy_port_var).pack(fill="x", padx=5, pady=5)
+        
+        # 账号密码
+        auth_frame = ttk.Frame(proxy_frame)
+        auth_frame.pack(fill="x", padx=5, pady=5)
+        ttk.Label(auth_frame, text="账号（可选）:").pack(anchor="w")
+        self.proxy_user_var = tk.StringVar(value=self.config["proxy_user"])
+        ttk.Entry(auth_frame, textvariable=self.proxy_user_var).pack(fill="x")
+        ttk.Label(auth_frame, text="密码（可选）:").pack(anchor="w")
+        self.proxy_pass_var = tk.StringVar(value=self.config["proxy_pass"])
+        ttk.Entry(auth_frame, textvariable=self.proxy_pass_var, show="*").pack(fill="x")
         
         # 保存按钮
         btn_frame = ttk.Frame(self.tab_settings)
@@ -272,6 +308,16 @@ class App:
         if not chrome_found:
             self._append_status("  未找到 Chrome", "FAIL")
         
+        # 检查 Edge
+        edge_paths = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        ]
+        edge_found = any(Path(p).exists() for p in edge_paths)
+        self._append_status(f"✓ Edge 浏览器:", "OK" if edge_found else "FAIL")
+        if not edge_found:
+            self._append_status("  未找到 Edge", "FAIL")
+        
         # 检查 ffmpeg
         ffmpeg_path = self.config["ffmpeg_path"]
         if not ffmpeg_path or not Path(ffmpeg_path).exists():
@@ -290,7 +336,7 @@ class App:
         else:
             self._append_status(f"  路径: {ffmpeg_path}", "OK")
         
-        return not missing_deps and chrome_found and ffmpeg_found
+        return not missing_deps and (chrome_found or edge_found) and ffmpeg_found
     
     def _append_status(self, text, status):
         """追加状态信息"""
@@ -340,6 +386,8 @@ class App:
         self.config["proxy_enabled"] = self.proxy_enabled_var.get()
         self.config["proxy_host"] = self.proxy_host_var.get()
         self.config["proxy_port"] = self.proxy_port_var.get()
+        self.config["proxy_user"] = self.proxy_user_var.get()
+        self.config["proxy_pass"] = self.proxy_pass_var.get()
         save_config(self.config)
         messagebox.showinfo("保存成功", "设置已保存")
     
@@ -347,19 +395,95 @@ class App:
         """清空日志"""
         self.log_text.delete(1.0, tk.END)
     
+    def _log_to_ui(self, text, level="info"):
+        """记录日志到 UI"""
+        self.log_text.insert(tk.END, f"{text}\n")
+        self.log_text.see(tk.END)
+        logger.info(text)
+    
+    def _status_to_ui(self, text_widget, text):
+        """记录状态到指定文本框"""
+        text_widget.insert(tk.END, f"{text}\n")
+        text_widget.see(tk.END)
+    
     def _start_crawl(self):
         """开始批量爬取"""
-        messagebox.showinfo("提示", "批量爬取功能需要 crawler_core.py 支持")
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+        
+        # 初始化爬虫
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._status_to_ui,
+            progress_callback=lambda c, t: self._update_progress(self.crawl_progress, c, t)
+        )
+        
+        # 在新线程中运行
+        def run():
+            try:
+                self.crawler.crawl_batch(
+                    page_start=self.page_start_var.get(),
+                    page_end=self.page_end_var.get(),
+                    list_type=self.list_type_var.get()
+                )
+                self._status_to_ui(self.crawl_status_text, "\n✓ 批量爬取完成")
+            except Exception as e:
+                self._status_to_ui(self.crawl_status_text, f"\n✗ 错误: {e}")
+                logger.exception("批量爬取失败")
+        
+        self.crawl_thread = threading.Thread(target=run)
+        self.crawl_thread.daemon = True
+        self.crawl_thread.start()
     
     def _start_single(self):
         """开始单个下载"""
-        messagebox.showinfo("提示", "单个下载功能需要 crawler_core.py 支持")
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+        
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("警告", "请输入视频 URL")
+            return
+        
+        title = self.title_var.get().strip() or None
+        
+        # 初始化爬虫
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._status_to_ui,
+            progress_callback=lambda c, t: self._update_progress(self.single_progress, c, t)
+        )
+        
+        # 在新线程中运行
+        def run():
+            try:
+                self.crawler.download_single(url, title)
+                self._status_to_ui(self.single_status_text, "\n✓ 下载完成")
+            except Exception as e:
+                self._status_to_ui(self.single_status_text, f"\n✗ 错误: {e}")
+                logger.exception("单个下载失败")
+        
+        self.crawl_thread = threading.Thread(target=run)
+        self.crawl_thread.daemon = True
+        self.crawl_thread.start()
     
-    def _log_to_ui(self, message):
-        """记录日志到 UI"""
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        logger.info(message)
+    def _stop_crawl(self):
+        """停止任务"""
+        if self.crawler:
+            self.crawler.stop()
+            if self.crawl_thread and self.crawl_thread.is_alive():
+                self.crawl_thread.join(timeout=5)
+            self._status_to_ui(self.crawl_status_text, "\n已停止")
+            self._status_to_ui(self.single_status_text, "\n已停止")
+    
+    def _update_progress(self, progressbar, current, total):
+        """更新进度条"""
+        if total > 0:
+            percent = (current / total) * 100
+            progressbar["value"] = percent
+        self.root.update()
 
 def main():
     """主函数"""
