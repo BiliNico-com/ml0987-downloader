@@ -103,7 +103,7 @@ class App:
         self._check_environment()
 
         # 检查 ffmpeg.exe
-        self._check_ffmpeg()
+        self.check_ffmpeg()
     
     def _create_widgets(self):
         """创建界面组件"""
