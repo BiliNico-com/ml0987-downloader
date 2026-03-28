@@ -11,12 +11,8 @@ import json
 import logging
 import logging.handlers
 import threading
-import subprocess
 import time
 from pathlib import Path
-from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 
 try:
     import tkinter as tk
@@ -260,17 +256,8 @@ class App:
         entry.pack(fill="x", padx=5, pady=5)
         ttk.Button(dir_frame, text="选择目录...", command=self._browse_dir).pack(anchor="w", padx=5, pady=5)
         
-        # 浏览器选择
-        browser_frame = ttk.LabelFrame(self.tab_settings, text="浏览器选择", padding=10)
-        browser_frame.pack(fill="x", padx=20, pady=10)
-        
-        ttk.Label(browser_frame, text="选择浏览器:").pack(anchor="w", padx=5)
-        self.browser_var = tk.StringVar(value=self.config.get("browser", "edge"))
-        ttk.Combobox(browser_frame, textvariable=self.browser_var, 
-                    values=["chrome", "edge"], width=10, state="readonly").pack(anchor="w", padx=5, pady=5)
-        
         # 代理设置
-        proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理", padding=10)
+        proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理（可选）", padding=10)
         proxy_frame.pack(fill="x", padx=20, pady=10)
         
         # 代理启用复选框
