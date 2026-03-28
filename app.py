@@ -233,12 +233,18 @@ class App:
         entry.pack(fill="x", padx=5, pady=5)
         ttk.Button(dir_frame, text="选择目录...", command=self._browse_dir).pack(anchor="w", padx=5, pady=5)
         
+        # 浏览器选择
+        browser_frame = ttk.LabelFrame(self.tab_settings, text="浏览器选择", padding=10)
+        browser_frame.pack(fill="x", padx=20, pady=10)
+        
+        ttk.Label(browser_frame, text="选择浏览器:").pack(anchor="w", padx=5)
+        self.browser_var = tk.StringVar(value=self.config.get("browser", "chrome"))
+        ttk.Combobox(browser_frame, textvariable=self.browser_var, 
+                    values=["chrome", "edge"], width=10, state="readonly").pack(anchor="w", padx=5, pady=5)
+        
         # 代理设置
         proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理", padding=10)
         proxy_frame.pack(fill="x", padx=20, pady=10)
-        
-        self.proxy_enabled_var = tk.BooleanVar(value=self.config["proxy_enabled"])
-        ttk.Checkbutton(proxy_frame, text="启用代理", variable=self.proxy_enabled_var).pack(anchor="w", padx=5, pady=5)
         
         ttk.Label(proxy_frame, text="主机:").pack(anchor="w", padx=5)
         self.proxy_host_var = tk.StringVar(value=self.config["proxy_host"])
