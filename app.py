@@ -406,21 +406,34 @@ class App:
         self.log_text.delete(1.0, tk.END)
     
     def _log_to_ui(self, text, level="info"):
-        """记录日志到 UI"""
-        self.log_text.insert(tk.END, f"{text}\n")
-        self.log_text.see(tk.END)
+        """记录日志到 UI（线程安全，通过 root.after 调度到主线程）"""
+        timestamp = time.strftime("%H:%M:%S")
+        prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
+        line = f"[{timestamp}] {prefix} {text}\n"
+        try:
+            self.root.after(0, lambda: self._append_log(line))
+        except Exception:
+            pass
         logger.info(text)
+
+    def _append_log(self, line):
+        """在主线程中安全追加日志"""
+        self.log_text.insert(tk.END, line)
+        self.log_text.see(tk.END)
     
     def _status_to_ui(self, text_widget, text):
-        """记录状态到指定文本框（修复：确保参数顺序正确）"""
-        # 参数说明：
-        # text_widget: ScrolledText 控件对象
-        # text: 要显示的文本字符串
+        """记录状态到指定文本框（线程安全）"""
         if text_widget is None:
-            logger.warning("text_widget 为 None，跳过 UI 更新")
             return
-        text_widget.insert(tk.END, f"{text}\n")
-        text_widget.see(tk.END)
+        try:
+            self.root.after(0, lambda: self._append_text(text_widget, text))
+        except Exception:
+            pass
+
+    def _append_text(self, widget, text):
+        """在主线程中安全追加文本到指定控件"""
+        widget.insert(tk.END, f"{text}\n")
+        widget.see(tk.END)
     
     def _start_crawl(self):
         """开始批量爬取"""
@@ -431,7 +444,7 @@ class App:
         # 初始化爬虫
         self.crawler = CrawlerCore(
             self.config,
-            log_callback=self._status_to_ui,
+            log_callback=self._log_to_ui,
             progress_callback=lambda c, t: self._update_progress(self.crawl_progress, c, t)
         )
         
@@ -443,9 +456,9 @@ class App:
                     page_end=self.page_end_var.get(),
                     list_type=self.list_type_var.get()
                 )
-                self._status_to_ui(self.crawl_status_text, "\n批量爬取完成")
+                self._status_to_ui(self.crawl_status_text, "批量爬取完成")
             except Exception as e:
-                self._status_to_ui(self.crawl_status_text, f"\n错误: {e}")
+                self._status_to_ui(self.crawl_status_text, f"错误: {e}")
                 logger.exception("批量爬取失败")
         
         self.crawl_thread = threading.Thread(target=run)
@@ -468,7 +481,7 @@ class App:
         # 初始化爬虫
         self.crawler = CrawlerCore(
             self.config,
-            log_callback=self._status_to_ui,
+            log_callback=self._log_to_ui,
             progress_callback=lambda c, t: self._update_progress(self.single_progress, c, t)
         )
         
@@ -476,9 +489,9 @@ class App:
         def run():
             try:
                 self.crawler.download_single(url, title)
-                self._status_to_ui(self.single_status_text, "\n下载完成")
+                self._status_to_ui(self.single_status_text, "下载完成")
             except Exception as e:
-                self._status_to_ui(self.single_status_text, f"\n错误: {e}")
+                self._status_to_ui(self.single_status_text, f"错误: {e}")
                 logger.exception("单个下载失败")
         
         self.crawl_thread = threading.Thread(target=run)
@@ -491,15 +504,17 @@ class App:
             self.crawler.stop()
             if self.crawl_thread and self.crawl_thread.is_alive():
                 self.crawl_thread.join(timeout=5)
-            self._status_to_ui(self.crawl_status_text, "\n已停止")
-            self._status_to_ui(self.single_status_text, "\n已停止")
+            self._status_to_ui(self.crawl_status_text, "已停止")
+            self._status_to_ui(self.single_status_text, "已停止")
     
     def _update_progress(self, progressbar, current, total):
-        """更新进度条"""
+        """更新进度条（线程安全）"""
         if total > 0:
             percent = (current / total) * 100
-            progressbar["value"] = percent
-        self.root.update()
+            try:
+                self.root.after(0, lambda: progressbar.configure(value=percent))
+            except Exception:
+                pass
 
 def main():
     """主函数"""
