@@ -837,6 +837,107 @@ class CrawlerCore:
             self._log(f"提取搜索结果失败: {e}", "error")
             return []
 
+    def search_authors(self, keyword: str) -> List[dict]:
+        """搜索作者，返回 [{'name', 'url', 'count'}, ...]"""
+        from urllib.parse import quote
+        search_url = f"{self.base_url}/search.htm?search={quote(keyword)}"
+        try:
+            resp = http_get(search_url, timeout=15)
+            if not resp or resp.status_code != 200:
+                self._log(f"搜索作者失败: HTTP {resp.status_code if resp else '无响应'}", "error")
+                return []
+        except Exception as e:
+            self._log(f"搜索作者失败: {e}", "error")
+            return []
+
+        authors = []
+        # 匹配作者链接: <a href="user.htm?author=xxx">名字 数量</a>
+        for m in re.finditer(
+            r'<a[^>]*href="user\.htm\?author=([^"]+)"[^>]*>([^<]*?)(\d+)\s*</a>',
+            resp.text
+        ):
+            author_param = m.group(1)
+            name_part = m.group(2).strip().rstrip(',').rstrip('，')
+            count = int(m.group(3))
+            authors.append({
+                "name": name_part or author_param,
+                "param": author_param,
+                "url": f"{self.base_url}/user.htm?author={author_param}",
+                "count": count,
+            })
+
+        return authors
+
+    def crawl_authors(self, authors: List[dict], page_start: int = 1, page_end: int = 1) -> dict:
+        """爬取指定作者的视频列表并下载，返回 {success: int, skipped: int}"""
+        total_success = 0
+        total_skipped = 0
+
+        for author_info in authors:
+            if self._stop_flag:
+                break
+
+            author_name = author_info.get("name", "未知作者")
+            author_url = author_info.get("url", "")
+            self._log(f"===== 开始爬取作者: {author_name} =====")
+
+            for page in range(page_start, page_end + 1):
+                if self._stop_flag:
+                    break
+
+                self._log(f"  第 {page} 页...")
+
+                if page == 1:
+                    list_url = author_url
+                else:
+                    from urllib.parse import urlencode, urlparse, parse_qs
+                    parsed = urlparse(author_url)
+                    params = parse_qs(parsed.query)
+                    params["page"] = [str(page)]
+                    list_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(params, doseq=True)}"
+
+                video_list = self._extract_video_urls(list_url)
+                if not video_list:
+                    self._log(f"  第 {page} 页未发现视频", "warn")
+                    continue
+
+                self._log(f"  发现 {len(video_list)} 个视频")
+
+                for idx, video in enumerate(video_list, 1):
+                    if self._stop_flag:
+                        break
+
+                    url = video["url"]
+                    vid = video.get("id")
+                    title = video.get("title") or f"{author_name}_第{page}页_第{idx}个"
+                    cover = video.get("cover") or ""
+
+                    if vid and self._is_downloaded(vid):
+                        self._log(f"  [{idx}/{len(video_list)}] 已下载过，跳过: {title}")
+                        total_skipped += 1
+                        continue
+
+                    self._log(f"  [{idx}/{len(video_list)}] {title}")
+
+                    if hasattr(self, 'info_callback') and self.info_callback and cover:
+                        try:
+                            self.info_callback({"title": title, "cover": cover})
+                        except Exception:
+                            pass
+
+                    if self.download_single(url, title, video_id=vid):
+                        if vid and self._history.get(vid, {}).get("download_time"):
+                            total_success += 1
+                        else:
+                            total_skipped += 1
+
+                    time.sleep(2)
+
+            self._log(f"===== 作者 {author_name} 完成 =====")
+
+        self._log(f"作者爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        return {"success": total_success, "skipped": total_skipped}
+
     def _extract_video_urls(self, list_url: str) -> List[dict]:
         """提取视频链接，返回 [{'url', 'id', 'title', 'cover'}, ...]"""
         try:

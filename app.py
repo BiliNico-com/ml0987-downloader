@@ -267,7 +267,7 @@ class App:
         control_frame = ttk.LabelFrame(self.tab_search, text="搜索设置", padding=10)
         control_frame.pack(fill="x", padx=20, pady=(10, 5))
 
-        # 第一行：域名 + 搜索关键词
+        # 第一行：域名 + 搜索类型 + 关键词
         row1 = ttk.Frame(control_frame)
         row1.pack(fill="x", pady=3)
         ttk.Label(row1, text="站点:").pack(side="left")
@@ -275,28 +275,70 @@ class App:
         site_combo = ttk.Combobox(row1, textvariable=self.search_site_var,
                                   values=["https://ml0987.xyz", "https://hsex.icu", "https://hsex.men", "https://hsex.tv"],
                                   width=16, state="readonly")
-        site_combo.pack(side="left", padx=(5, 20))
+        site_combo.pack(side="left", padx=(5, 15))
+        ttk.Label(row1, text="类型:").pack(side="left")
+        self.search_type_var = tk.StringVar(value="搜视频")
+        type_combo = ttk.Combobox(row1, textvariable=self.search_type_var,
+                                  values=["搜视频", "搜作者"], width=8, state="readonly")
+        type_combo.pack(side="left", padx=(5, 15))
         ttk.Label(row1, text="关键词:").pack(side="left")
         self.search_keyword_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.search_keyword_var, width=25).pack(side="left", padx=5)
+        search_entry = ttk.Entry(row1, textvariable=self.search_keyword_var, width=20)
+        search_entry.pack(side="left", padx=5)
+        search_entry.bind("<Return>", lambda e: self._on_search_action())
 
-        # 第二行：排序 + 页码 + 按钮
-        row2 = ttk.Frame(control_frame)
-        row2.pack(fill="x", pady=3)
-        ttk.Label(row2, text="排序:").pack(side="left")
+        # 第二行：排序 + 页码 + 按钮（搜视频模式）
+        self.search_video_frame = ttk.Frame(control_frame)
+        self.search_video_frame.pack(fill="x", pady=3)
+
+        ttk.Label(self.search_video_frame, text="排序:").pack(side="left")
         self.search_sort_var = tk.StringVar(value="最新")
-        sort_combo = ttk.Combobox(row2, textvariable=self.search_sort_var,
+        sort_combo = ttk.Combobox(self.search_video_frame, textvariable=self.search_sort_var,
                                   values=["最新", "最热"], width=8, state="readonly")
         sort_combo.pack(side="left", padx=(5, 20))
-        ttk.Label(row2, text="页码:").pack(side="left")
+        ttk.Label(self.search_video_frame, text="页码:").pack(side="left")
         self.search_page_start_var = tk.IntVar(value=1)
-        ttk.Spinbox(row2, from_=1, to=100, textvariable=self.search_page_start_var, width=5).pack(side="left", padx=2)
-        ttk.Label(row2, text="~").pack(side="left")
+        ttk.Spinbox(self.search_video_frame, from_=1, to=100, textvariable=self.search_page_start_var, width=5).pack(side="left", padx=2)
+        ttk.Label(self.search_video_frame, text="~").pack(side="left")
         self.search_page_end_var = tk.IntVar(value=3)
-        ttk.Spinbox(row2, from_=1, to=100, textvariable=self.search_page_end_var, width=5).pack(side="left", padx=(2, 15))
+        ttk.Spinbox(self.search_video_frame, from_=1, to=100, textvariable=self.search_page_end_var, width=5).pack(side="left", padx=(2, 15))
 
-        ttk.Button(row2, text="▶ 搜索并下载", command=self._start_search).pack(side="left", padx=3)
-        ttk.Button(row2, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
+        ttk.Button(self.search_video_frame, text="▶ 搜索并下载", command=self._start_search).pack(side="left", padx=3)
+        ttk.Button(self.search_video_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
+
+        # 第二行：搜作者模式（按钮不同）
+        self.search_author_frame = ttk.Frame(control_frame)
+        # 不 pack，由 _toggle_search_mode 控制显示
+
+        ttk.Button(self.search_author_frame, text="🔍 搜索作者", command=self._search_authors).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="全选", command=self._select_all_authors).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="取消全选", command=self._deselect_all_authors).pack(side="left", padx=3)
+        ttk.Label(self.search_author_frame, text="作者页码:").pack(side="left", padx=(15, 0))
+        self.search_author_page_start_var = tk.IntVar(value=1)
+        ttk.Spinbox(self.search_author_frame, from_=1, to=100, textvariable=self.search_author_page_start_var, width=5).pack(side="left", padx=2)
+        ttk.Label(self.search_author_frame, text="~").pack(side="left")
+        self.search_author_page_end_var = tk.IntVar(value=1)
+        ttk.Spinbox(self.search_author_frame, from_=1, to=100, textvariable=self.search_author_page_end_var, width=5).pack(side="left", padx=(2, 15))
+        ttk.Button(self.search_author_frame, text="▶ 下载选中作者的视频", command=self._start_author_crawl).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
+
+        # 作者列表区域（搜作者模式时显示，在封面和进度之间）
+        self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="搜索到的作者（勾选要下载的）", padding=5)
+        # 不 pack，由 _toggle_search_mode 控制显示
+        self.search_author_listbox_frame = ttk.Frame(self.search_author_list_frame)
+        self.search_author_listbox_frame.pack(fill="both", expand=True)
+
+        # 用 Canvas + Scrollbar + Checkbutton 实现可勾选列表
+        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=100)
+        self._author_scrollbar = ttk.Scrollbar(self.search_author_listbox_frame, orient="vertical", command=self._author_canvas.yview)
+        self._author_inner_frame = ttk.Frame(self._author_canvas)
+        self._author_inner_frame.bind("<Configure>", lambda e: self._author_canvas.configure(scrollregion=self._author_canvas.bbox("all")))
+        self._author_canvas.create_window((0, 0), window=self._author_inner_frame, anchor="nw")
+        self._author_canvas.configure(yscrollcommand=self._author_scrollbar.set)
+        self._author_canvas.pack(side="left", fill="both", expand=True)
+        self._author_scrollbar.pack(side="right", fill="y")
+
+        self._author_check_vars = []  # 存储作者勾选变量
 
         # 下方区域：左边封面 + 右边进度
         bottom_frame = ttk.Frame(self.tab_search)
@@ -336,6 +378,139 @@ class App:
         self.search_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
         self.search_status_text.pack(fill="both", expand=True, pady=(5, 0))
+
+        # 绑定搜索类型切换
+        self.search_type_var.trace_add("write", lambda *_: self._toggle_search_mode())
+        # 初始化显示状态
+        self._toggle_search_mode()
+
+    def _toggle_search_mode(self):
+        """切换搜索模式（搜视频/搜作者）"""
+        is_author = self.search_type_var.get() == "搜作者"
+        if is_author:
+            self.search_video_frame.pack_forget()
+            self.search_author_frame.pack(fill="x", pady=3)
+            self.search_author_list_frame.pack(fill="x", padx=20, pady=(0, 5))
+        else:
+            self.search_author_frame.pack_forget()
+            self.search_author_list_frame.pack_forget()
+            self.search_video_frame.pack(fill="x", pady=3)
+
+    def _on_search_action(self):
+        """回车键触发搜索"""
+        if self.search_type_var.get() == "搜作者":
+            self._search_authors()
+        else:
+            self._start_search()
+
+    def _search_authors(self):
+        """搜索作者，在列表中展示结果"""
+        keyword = self.search_keyword_var.get().strip()
+        if not keyword:
+            messagebox.showwarning("警告", "请输入搜索关键词")
+            return
+
+        # 清空旧列表
+        for widget in self._author_inner_frame.winfo_children():
+            widget.destroy()
+        self._author_check_vars.clear()
+
+        self.search_overall_label.config(text="正在搜索作者...")
+
+        def run():
+            try:
+                crawler = CrawlerCore(
+                    self.config,
+                    log_callback=self._log_to_ui,
+                    base_url=self.search_site_var.get(),
+                )
+                authors = crawler.search_authors(keyword)
+            except Exception as e:
+                self.root.after(0, lambda: self.search_overall_label.config(text=f"搜索失败: {e}"))
+                return
+
+            def show_results():
+                if not authors:
+                    self.search_overall_label.config(text=f"未找到匹配的作者: {keyword}")
+                    return
+
+                self.search_overall_label.config(text=f"找到 {len(authors)} 个作者")
+
+                for author in authors:
+                    var = tk.BooleanVar(value=True)
+                    self._author_check_vars.append((var, author))
+                    cb = ttk.Checkbutton(
+                        self._author_inner_frame,
+                        text=f"{author['name']}  （{author['count']} 个视频）",
+                        variable=var
+                    )
+                    cb.pack(anchor="w", pady=1)
+
+            self.root.after(0, show_results)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _select_all_authors(self):
+        """全选作者"""
+        for var, _ in self._author_check_vars:
+            var.set(True)
+
+    def _deselect_all_authors(self):
+        """取消全选"""
+        for var, _ in self._author_check_vars:
+            var.set(False)
+
+    def _start_author_crawl(self):
+        """下载选中作者的视频"""
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        selected = [author for var, author in self._author_check_vars if var.get()]
+        if not selected:
+            messagebox.showwarning("警告", "请勾选至少一个作者")
+            return
+
+        names = ", ".join(a["name"] for a in selected)
+        self._log_to_ui(f"准备爬取作者: {names}")
+
+        def on_progress(current, total):
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self._update_progress(
+                self.search_progress, current, total,
+                self.search_slice_label,
+                f"切片: {pct}"
+            )
+
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._log_to_ui,
+            progress_callback=on_progress,
+            info_callback=self._update_search_cover_preview,
+            base_url=self.search_site_var.get(),
+        )
+
+        def run():
+            try:
+                self.root.after(0, lambda: self.search_overall_label.config(text="正在下载作者视频..."))
+                result = self.crawler.crawl_authors(
+                    authors=selected,
+                    page_start=self.search_author_page_start_var.get(),
+                    page_end=self.search_author_page_end_var.get(),
+                )
+                success = result.get("success", 0)
+                skipped = result.get("skipped", 0)
+                self.root.after(0, lambda: self.search_overall_label.config(
+                    text=f"完成 — 新下载: {success}，跳过: {skipped}"
+                ))
+                self._status_to_ui(self.search_status_text, f"── 作者下载完成（新下载: {success}，跳过: {skipped}） ──")
+            except Exception as e:
+                self._status_to_ui(self.search_status_text, f"错误: {e}")
+                logger.exception("作者下载失败")
+
+        self.crawl_thread = threading.Thread(target=run)
+        self.crawl_thread.daemon = True
+        self.crawl_thread.start()
 
     # ==================== 单视频 Tab ====================
 
