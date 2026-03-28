@@ -1,104 +1,53 @@
-name: Build Windows Executable
+name: Build ml0987 Downloader
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - '**/*.py'
+      - 'crawler/**'
       - '.github/workflows/build.yml'
 
 jobs:
   build:
-    runs-on: windows-latest
-
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
-    - name: Build with PyInstaller
-      run: pyinstaller --onefile --windowed --name "ml0987-downloader" app.py
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name app crawler_core.py
 
-    - name: Verify build output
-      run: |
-        if exist "dist\ml0987-downloader.exe" (
-          echo Build successful
-        ) else (
-          echo Build failed
-          exit 1
-        )
+      - name: Verify build output
+        run: |
+          if [ -f "dist/app" ]; then
+            echo "Build successful"
+          else
+            echo "Build failed"
+            exit 1
+          fi
 
-    - name: Create release package
-      run: |
-        cd dist
-        7z a ml0987-downloader-windows.zip ml0987-downloader.exe
+      - name: Create release package
+        run: |
+          cd dist
+          zip -r ml0987-downloader-linux.zip app
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ml0987-downloader-windows
-        path: dist/ml0987-downloader-windows.zip
-        retention-days: 30
-name: Build Windows Executable
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '**/*.py'
-      - '.github/workflows/build.yml'
-
-jobs:
-  build:
-    runs-on: windows-latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
-
-    - name: Build with PyInstaller
-      run: pyinstaller --onefile --windowed --name "ml0987-downloader" app.py
-
-    - name: Verify build output
-      run: |
-        if exist "dist\ml0987-downloader.exe" (
-          echo Build successful
-        ) else (
-          echo Build failed
-          exit 1
-        )
-
-    - name: Create release package
-      run: |
-        cd dist
-        7z a ml0987-downloader-windows.zip ml0987-downloader.exe
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ml0987-downloader-windows
-        path: dist/ml0987-downloader-windows.zip
-        retention-days: 30
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ml0987-downloader-linux
+          path: dist/ml0987-downloader-linux.zip
+          retention-days: 30
