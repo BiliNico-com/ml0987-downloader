@@ -18,8 +18,11 @@ jobs:
   build-windows-test:
     runs-on: windows-latest
     env:
-      # 关键：改用纯英文文件名，避免中文乱码
+      # 纯英文文件名，彻底避免中文编码问题
       TEST_ZIP_NAME: ml0987_downloader_test.zip
+      # 设置编码，减少乱码
+      PYTHONIOENCODING: utf-8
+      LC_ALL: C.UTF-8
     defaults:
       run:
         shell: cmd
@@ -42,7 +45,6 @@ jobs:
 
       - name: 打包EXE
         run: |
-          # 主程序仍用中文名称（最终用户能看到），仅打包文件用英文
           pyinstaller --onefile --windowed --name "ml0987下载器" app.py
 
       - name: 创建测试包目录
@@ -64,9 +66,9 @@ jobs:
           $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
           if ($ffmpeg_exe) {
               Copy-Item -Path $ffmpeg_exe.FullName -Destination 'dist\test_package\ffmpeg.exe' -Force
-              Write-Host '✅ FFmpeg复制成功'
+              Write-Host '✅ FFmpeg copied successfully'  # 改用英文输出，避免乱码
           } else {
-              Write-Error '❌ 未找到ffmpeg.exe'
+              Write-Error '❌ FFmpeg.exe not found'
               exit 1
           }
 
@@ -75,27 +77,23 @@ jobs:
           copy dist\ml0987下载器.exe dist\test_package\
           copy requirements.txt dist\test_package\
           echo {"output_dir":"downloads","ffmpeg_path":"","proxy_enabled":false} > dist\test_package\config.json
-          # 说明文件用英文命名（避免乱码），内容仍保留中文
-          echo === 测试包使用说明 === > dist\test_package\readme.txt
-          echo 1. 直接运行ml0987下载器.exe测试 >> dist\test_package\readme.txt
-          echo 2. 内置FFmpeg，无需额外下载 >> dist\test_package\readme.txt
+          echo === Test Package Instructions === > dist\test_package\readme.txt
+          echo 1. Run ml0987下载器.exe directly to test >> dist\test_package\readme.txt
+          echo 2. FFmpeg is included, no need to download separately >> dist\test_package\readme.txt
 
       - name: 压缩测试包
         shell: powershell
         run: |
-          Write-Host '🔍 测试包目录文件列表：'
+          Write-Host '🔍 Test package files:'
           Get-ChildItem -Path 'dist\test_package'
-          # 使用英文变量名，避免中文编码问题
           Compress-Archive -Path 'dist\test_package\*' -DestinationPath "dist\${{ env.TEST_ZIP_NAME }}"
-          Write-Host '🔍 最终生成的文件：'
+          Write-Host '🔍 Final generated files:'
           Get-ChildItem -Path 'dist'
 
       - name: 上传临时测试包（Artifacts）
         uses: actions/upload-artifact@v4
         with:
-          # Artifacts名称用英文，避免显示乱码
           name: ml0987-downloader-test-package
-          # 路径用英文变量，100%匹配生成的文件
           path: dist\${{ env.TEST_ZIP_NAME }}
           retention-days: 7
           if-no-files-found: error
