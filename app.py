@@ -719,9 +719,7 @@ class App:
     # ==================== 代理测试 ====================
 
     def _test_proxy(self):
-        """测试代理连接是否可用"""
-        import requests as req
-
+        """测试代理连接是否可用（使用本地 socks.py，无需安装）"""
         host = self.proxy_host_var.get().strip()
         port = self.proxy_port_var.get().strip()
         user = self.proxy_user_var.get().strip()
@@ -730,13 +728,6 @@ class App:
         if not host or not port:
             messagebox.showwarning("提示", "请填写代理主机和端口")
             return
-
-        # 构建 proxies
-        if user and passwd:
-            proxy_url = f"socks5h://{user}:{passwd}@{host}:{port}"
-        else:
-            proxy_url = f"socks5h://{host}:{port}"
-        proxies = {"http": proxy_url, "https": proxy_url}
 
         # 弹出结果窗口
         result_win = tk.Toplevel(self.root)
@@ -749,16 +740,26 @@ class App:
         result_text.pack(fill="both", expand=True, padx=10, pady=10)
 
         def append(text, tag=None):
-            if tag:
-                result_text.tag_config(tag, foreground={"green": "#2e7d32", "red": "#c62828", "orange": "#e65100"}.get(tag, "black"))
+            color_map = {"green": "#2e7d32", "red": "#c62828", "orange": "#e65100"}
+            if tag and tag in color_map:
+                result_text.tag_config(tag, foreground=color_map[tag])
                 result_text.insert(tk.END, text + "\n", tag)
             else:
                 result_text.insert(tk.END, text + "\n")
             result_text.see(tk.END)
 
-        append(f"代理: {proxy_url}\n")
+        proxy_label = f"socks5h://{host}:{port}"
+        append(f"代理: {proxy_label}\n")
 
         def run_test():
+            import requests as req
+            # 本地 socks.py 提供支持，无需 pip install
+            if user and passwd:
+                proxy_url = f"socks5h://{user}:{passwd}@{host}:{port}"
+            else:
+                proxy_url = f"socks5h://{host}:{port}"
+            proxies = {"http": proxy_url, "https": proxy_url}
+
             targets = [
                 ("Google", "https://www.google.com"),
                 ("YouTube", "https://www.youtube.com"),
@@ -785,12 +786,8 @@ class App:
                         self.root.after(0, lambda n=name, s=status: append(f"  ✓ {n} — HTTP {s}", "green"))
                     else:
                         self.root.after(0, lambda n=name, s=status: append(f"  ✗ {n} — HTTP {s}", "orange"))
-                except req.exceptions.Timeout:
-                    self.root.after(0, lambda n=name: append(f"  ✗ {n} — 超时", "red"))
-                except req.exceptions.ConnectionError as e:
-                    self.root.after(0, lambda n=name: append(f"  ✗ {n} — 连接失败", "red"))
                 except Exception as e:
-                    self.root.after(0, lambda n=name, err=str(e)[:80]: append(f"  ✗ {n} — {err}", "red"))
+                    self.root.after(0, lambda n=name, err=str(e)[:100]: append(f"  ✗ {n} — {err}", "red"))
 
             self.root.after(0, lambda: append("\n── 测试完成 ──"))
 

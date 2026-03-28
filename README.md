@@ -1,49 +1,72 @@
-# ml0987 视频下载器
+# hsex 视频下载器
 
-纯 Python + tkinter GUI，无需浏览器驱动，批量下载 ml0987.xyz 视频。
+纯 Python + tkinter GUI，无需浏览器驱动，批量下载 ml0987 视频。
 
 ## 功能
 
 - **批量爬取** — 支持视频、周榜、月榜、5分钟+、10分钟+ 列表，自定义页码范围
 - **单视频下载** — 输入 URL 直接下载
 - **封面预览** — 批量爬取时实时显示当前视频封面和标题
+- **切片进度** — 实时显示当前视频的 TS 切片下载进度
+- **按上传日期分类** — 自动识别视频上传日期，按日期归类存储
+- **防重复下载** — 已下载视频自动跳过，跨次运行共享下载记录
+- **多域名** — 支持 ml0987.xyz / hsex.icu / hsex.men / hsex.tv 切换
+- **SOCKS5 代理** — 内置 SOCKS5 代理支持，无需额外安装 PySocks，可测试代理连接
 - **并发下载** — 多线程并发下载 TS 切片，速度快
 - **AES 解密** — 自动处理加密的 m3u8 流
-- **SOCKS5 代理** — 可选代理配置
-- **自动命名** — 按视频标题自动创建文件夹和命名文件
+- **随时停止** — 下载过程中可随时停止，不卡顿
 
-## 运行
+## 快速开始
 
-### 需要 Python 环境
+### 方式一：Python 环境运行
 
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-### 下载 exe 直接运行（无需 Python）
+### 方式二：下载 exe 直接运行（无需 Python）
 
 从 GitHub Releases 下载最新版，解压后双击运行。
 
 ## 依赖
 
-| 依赖 | 用途 |
-|---|---|
-| `requests` | HTTP 请求 |
-| `pycryptodome` | AES-128 解密（加密视频） |
-| `Pillow` | 封面图预览（webp 格式） |
-| `ffmpeg.exe` | TS 转 MP4（需放在程序同目录） |
+| 依赖 | 用途 | 必须 |
+|---|---|---|
+| `requests` | HTTP 请求 | ✅ |
+| `pycryptodome` | AES-128 解密（加密视频） | 可选 |
+| `Pillow` | 封面图预览（webp 格式） | 可选 |
+| `ffmpeg.exe` | TS 切片合并为 MP4 | ✅ |
 
-> ffmpeg.exe 不在 pip 里，需要手动下载放到程序目录。推荐从 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 下载 essentials 版。
+> `pycryptodome` 和 `Pillow` 缺失时程序仍可运行，仅对应功能不可用。
+
+> ffmpeg.exe 不在 pip 里，需要手动下载放到程序同目录。推荐从 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 下载 essentials 版。
 
 ## 输出结构
 
+按视频上传日期自动分类：
+
 ```
 downloads/
-└── 2026-03-29/
-    └── 视频标题/
-        └── 视频标题.mp4
+├── 2026-03-28/
+│   └── 视频标题A.mp4
+├── 2026-03-29/
+│   ├── 视频标题B.mp4
+│   └── 视频标题C.mp4
+└── ...
 ```
+
+## 文件说明
+
+```
+├── app.py              # GUI 主程序
+├── crawler_core.py     # 爬虫核心（requests + m3u8 + ffmpeg）
+├── socks.py            # PySocks 本地模块（SOCKS5 代理支持，BSD 协议）
+├── requirements.txt    # Python 依赖
+└── .gitignore          # Git 忽略规则
+```
+
+> `socks.py` 来源于 [PySocks](https://github.com/Anorov/PySocks)（BSD 协议），作为本地模块集成，无需 pip 安装。
 
 ## 构建
 
@@ -53,20 +76,13 @@ downloads/
 pip install -r requirements.txt
 pyinstaller --noconfirm --onedir --windowed --name "ml0987下载器" ^
     --add-data "crawler_core.py;." ^
+    --add-data "socks.py;." ^
     --hidden-import PIL --hidden-import PIL.ImageTk --hidden-import PIL.WebPImagePlugin ^
     --hidden-import Crypto.Cipher --collect-all Pillow --collect-all pycryptodome ^
     app.py
 ```
 
 打包后将 `ffmpeg.exe` 拷贝到 `dist/ml0987下载器/` 目录即可分发。
-
-## 文件说明
-
-```
-├── app.py              # GUI 主程序
-├── crawler_core.py     # 爬虫核心（requests + m3u8 + ffmpeg）
-└── requirements.txt    # Python 依赖
-```
 
 ## 许可证
 

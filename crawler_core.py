@@ -10,6 +10,7 @@ ml0987 视频下载器 - 核心爬虫模块
 import os
 import re
 import json
+import sys
 import time
 import logging
 import subprocess
@@ -132,24 +133,56 @@ def parse_relative_time(text: str) -> Optional[datetime]:
     return None
 
 
-def http_get(url: str, timeout: int = 15, headers: dict = None, allow_redirects: bool = True) -> Optional[requests.Response]:
+def http_get(url: str, timeout: int = 15, headers: dict = None, allow_redirects: bool = True,
+             session: requests.Session = None) -> Optional[requests.Response]:
     """统一的 HTTP GET，返回 Response 或 None"""
     if not requests:
         raise ImportError("requests 未安装，请运行: pip install requests")
     try:
-        return requests.get(url, timeout=timeout, headers=headers or DEFAULT_HEADERS,
-                            allow_redirects=allow_redirects)
+        http = session or requests
+        return http.get(url, timeout=timeout, headers=headers or DEFAULT_HEADERS,
+                        allow_redirects=allow_redirects)
     except Exception as e:
         logger.error(f"请求失败 {url}: {e}")
         return None
 
 
-def http_get_text(url: str, timeout: int = 15, headers: dict = None) -> Optional[str]:
+def http_get_text(url: str, timeout: int = 15, headers: dict = None,
+                  session: requests.Session = None) -> Optional[str]:
     """GET 并返回文本内容"""
-    resp = http_get(url, timeout=timeout, headers=headers)
+    resp = http_get(url, timeout=timeout, headers=headers, session=session)
     if resp and resp.status_code == 200:
         return resp.text
     return None
+
+
+# ==================== SOCKS5 代理支持（本地 socks.py，无需 pip install） ====================
+
+# 确保能导入项目目录下的 socks.py
+if getattr(sys, 'frozen', False):
+    # PyInstaller 打包后
+    _crawler_dir = Path(sys.executable).parent
+else:
+    _crawler_dir = Path(__file__).parent
+if str(_crawler_dir) not in sys.path:
+    sys.path.insert(0, str(_crawler_dir))
+
+import socks as socks_module  # noqa: E402 — 本地 socks.py
+
+
+def build_socks5_session(proxy_host: str, proxy_port: int,
+                         proxy_user: str = None, proxy_pass: str = None) -> requests.Session:
+    """创建使用 SOCKS5 代理的 requests Session"""
+    import requests as req
+
+    if proxy_user and proxy_pass:
+        proxy_url = f"socks5h://{proxy_user}:{proxy_pass}@{proxy_host}:{proxy_port}"
+    else:
+        proxy_url = f"socks5h://{proxy_host}:{proxy_port}"
+
+    session = req.Session()
+    session.proxies = {"http": proxy_url, "https": proxy_url}
+    return session
 
 
 # ==================== M3U8 解析器 ====================
@@ -157,10 +190,11 @@ def http_get_text(url: str, timeout: int = 15, headers: dict = None) -> Optional
 class M3U8Parser:
     """M3U8 解析器"""
 
-    def __init__(self, m3u8_url: str, headers: dict = None):
+    def __init__(self, m3u8_url: str, headers: dict = None, session: requests.Session = None):
         self.m3u8_url = m3u8_url
         self.base_url = m3u8_url.rsplit('/', 1)[0] if '/' in m3u8_url else m3u8_url
         self.headers = headers or DEFAULT_HEADERS
+        self.session = session
         self.segments: List[Tuple[str, Optional[bytes]]] = []
         self.key_url: Optional[str] = None
         self.is_encrypted = False
@@ -168,7 +202,7 @@ class M3U8Parser:
 
     def parse(self) -> bool:
         """解析 m3u8 文件"""
-        content = http_get_text(self.m3u8_url, headers=self.headers)
+        content = http_get_text(self.m3u8_url, headers=self.headers, session=self.session)
         if not content:
             logger.error(f"无法获取 m3u8: {self.m3u8_url}")
             return False
@@ -192,7 +226,7 @@ class M3U8Parser:
         best_url = self._resolve_url(best[2].strip())
         logger.info(f"选择最高分辨率: {best[0]}x{best[1]} -> {best_url}")
 
-        sub = M3U8Parser(best_url, self.headers)
+        sub = M3U8Parser(best_url, self.headers, session=self.session)
         if sub.parse():
             self.segments = sub.segments
             self.key_url = sub.key_url
@@ -236,10 +270,11 @@ class TSDownloader:
 
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path,
                  headers: dict = None, threads: int = None, key_url: str = None,
-                 progress_callback=None, stop_check=None):
+                 progress_callback=None, stop_check=None, session: requests.Session = None):
         self.segments = segments
         self.output_file = output_file
         self.headers = headers or DEFAULT_HEADERS
+        self.session = session
         self.threads = threads or min(32, (os.cpu_count() or 1) + 4)
         self.key_url = key_url
         self.progress_callback = progress_callback
@@ -303,7 +338,7 @@ class TSDownloader:
 
     def _download_segment(self, idx: int, url: str, iv: Optional[bytes]) -> Optional[bytes]:
         """下载单个切片（含解密）"""
-        resp = http_get(url, timeout=30, headers=self.headers)
+        resp = http_get(url, timeout=30, headers=self.headers, session=self.session)
         if not resp or resp.status_code != 200:
             raise Exception(f"HTTP {resp.status_code if resp else 'no response'}")
 
@@ -312,7 +347,7 @@ class TSDownloader:
         if self.key_url and iv and AES:
             try:
                 if self._key_cache is None:
-                    key_text = http_get_text(self.key_url)
+                    key_text = http_get_text(self.key_url, session=self.session)
                     if key_text:
                         self._key_cache = bytes.fromhex(key_text.strip())
 
@@ -382,6 +417,18 @@ class CrawlerCore:
         self.base_url = (base_url or config.get("site", "https://ml0987.xyz")).rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({**DEFAULT_HEADERS, "Referer": f"{self.base_url}/"})
+
+        # SOCKS5 代理配置（纯 Python 实现，无需 PySocks）
+        if config.get("proxy_enabled"):
+            proxy_host = config.get("proxy_host", "").strip()
+            proxy_port = config.get("proxy_port", "").strip()
+            if proxy_host and proxy_port:
+                proxy_user = config.get("proxy_user", "").strip() or None
+                proxy_pass = config.get("proxy_pass", "").strip() or None
+                self.session = build_socks5_session(proxy_host, proxy_port, proxy_user, proxy_pass)
+                self._log(f"SOCKS5 代理已启用: {proxy_host}:{proxy_port}")
+            else:
+                self._log("代理已启用但未配置主机/端口", "warn")
 
         # 已下载记录（防重复）
         self._history = self._load_history()
@@ -521,7 +568,7 @@ class CrawlerCore:
             return False
 
         # 解析 m3u8
-        parser = M3U8Parser(m3u8_url)
+        parser = M3U8Parser(m3u8_url, session=self.session)
         if not parser.parse():
             self._log("m3u8 解析失败", "error")
             return False
@@ -557,6 +604,7 @@ class CrawlerCore:
             key_url=parser.key_url,
             progress_callback=lambda c, t: self._progress(c, t),
             stop_check=lambda: self._stop_flag,
+            session=self.session,
         )
 
         success = downloader.download()
