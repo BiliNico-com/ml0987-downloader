@@ -9,7 +9,7 @@ on:
       - 'crawler_core.py'
       - 'requirements.txt'
       - '.github/workflows/build.yml'
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发（优先用这个）
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
       TEST_ZIP_NAME: ml0987下载器_测试包.zip
     defaults:
       run:
-        shell: cmd
+        shell: cmd  # 全局默认CMD
 
     steps:
       - name: 检出代码
@@ -35,41 +35,66 @@ jobs:
 
       - name: 安装依赖
         run: |
+          :: 升级pip并安装打包依赖
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller>=6.0.0
 
-      - name: 打包EXE
+      - name: 打包EXE（生成ml0987下载器.exe）
         run: |
+          :: 打包为单文件GUI程序
           pyinstaller --onefile --windowed --name "ml0987下载器" app.py
 
-      - name: 创建产物目录
+      - name: 创建测试包目录
         run: |
+          :: 确保测试包目录存在
           if not exist "dist\test_package" mkdir dist\test_package
 
-      - name: 下载并复制FFmpeg
+      - name: 创建FFmpeg临时目录
         run: |
-          mkdir ffmpeg_temp 2>nul
-          curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-          # 修复：PowerShell命令用单引号+单行无换行
-          powershell -Command Expand-Archive -Path 'ffmpeg_temp\ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force; $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1; if ($ffmpeg_exe) { Copy-Item -Path $ffmpeg_exe.FullName -Destination 'dist\test_package\ffmpeg.exe' -Force; Write-Host '✅ FFmpeg复制成功' } else { Write-Error '❌ 未找到FFmpeg'; exit 1 }
+          :: 单独创建临时目录（纯CMD语法）
+          if not exist "ffmpeg_temp" mkdir ffmpeg_temp
 
-      - name: 整理测试包文件
+      - name: 下载FFmpeg压缩包（纯CMD）
         run: |
+          :: 下载FFmpeg精简版
+          curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+
+      - name: 解压并复制FFmpeg（单独PowerShell步骤）
+        shell: powershell  # 明确指定用PowerShell执行
+        run: |
+          # PowerShell专属语法（这里用#注释没问题）
+          Expand-Archive -Path 'ffmpeg_temp\ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force
+          $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
+          if ($ffmpeg_exe) {
+              Copy-Item -Path $ffmpeg_exe.FullName -Destination 'dist\test_package\ffmpeg.exe' -Force
+              Write-Host '✅ FFmpeg复制成功'
+          } else {
+              Write-Error '❌ 未找到ffmpeg.exe'
+              exit 1
+          }
+
+      - name: 整理测试包文件（纯CMD）
+        run: |
+          :: 复制主程序和依赖说明
           copy dist\ml0987下载器.exe dist\test_package\
           copy requirements.txt dist\test_package\
+          :: 生成简化版配置（测试用）
           echo {"output_dir":"downloads","ffmpeg_path":"","proxy_enabled":false} > dist\test_package\config.json
+          :: 生成测试说明
           echo === 测试包使用说明 === > dist\test_package\测试说明.txt
           echo 1. 直接运行ml0987下载器.exe测试 >> dist\test_package\测试说明.txt
           echo 2. 内置FFmpeg，无需额外下载 >> dist\test_package\测试说明.txt
 
-      - name: 压缩测试包（修复引号问题）
+      - name: 压缩测试包（单独PowerShell步骤）
         shell: powershell
-        # 核心修复：所有路径用单引号，命令无换行，避免解析错误
         run: |
+          # 验证文件是否存在
           Write-Host '🔍 测试包目录文件列表：'
           Get-ChildItem -Path 'dist\test_package'
-          Compress-Archive -Path 'dist\test_package\*' -DestinationPath 'dist\${{ env.TEST_ZIP_NAME }}'
+          # 压缩为测试包
+          Compress-Archive -Path 'dist\test_package\*' -DestinationPath "dist\${{ env.TEST_ZIP_NAME }}"
+          # 验证压缩包生成
           Write-Host '🔍 最终生成的文件：'
           Get-ChildItem -Path 'dist'
 
