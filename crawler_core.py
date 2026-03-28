@@ -44,7 +44,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# ==================== 工具函数 ====================
+# ==================== 列表类型配置 ====================
+
+LIST_TYPES = {
+    "list":  "list-{page}.htm",       # 视频/Video list
+    "top7":  "top7_list-{page}.htm",  # 周榜/Weekly top
+    "top":   "top_list-{page}.htm",   # 月榜/Monthly top
+    "5min":  "5min_list-{page}.htm",  # 5分钟+/5min+
+    "long":  "long_list-{page}.htm",  # 10分钟+/10min+
+}
+
+# 中文名 -> 内部 key 映射
+LIST_TYPE_ALIASES = {
+    "视频":   "list",
+    "周榜":   "top7",
+    "月榜":   "top",
+    "5分钟+": "5min",
+    "10分钟+": "long",
+}
 
 def sanitize_filename(name: str) -> str:
     """清理文件名，移除非法字符"""
@@ -452,9 +469,25 @@ class CrawlerCore:
     
     # ==================== 批量爬取 ====================
     
-    def crawl_batch(self, page_start: int, page_end: int) -> int:
-        """批量爬取"""
+    def crawl_batch(self, page_start: int, page_end: int, list_type: str = "list") -> int:
+        """批量爬取
+        
+        Args:
+            page_start: 起始页码
+            page_end: 结束页码
+            list_type: 列表类型，支持 list/top7/top/5min/long
+        """
         total_success = 0
+        
+        # 获取列表 URL 模板（支持中文名映射）
+        list_key = LIST_TYPE_ALIASES.get(list_type, list_type)
+        url_pattern = LIST_TYPES.get(list_key)
+        if not url_pattern:
+            self._log(f"不支持的列表类型: {list_type}，使用默认 list", "warn")
+            url_pattern = LIST_TYPES["list"]
+            list_key = "list"
+        
+        self._log(f"列表类型: {list_type}，页码范围: {page_start}-{page_end}")
         
         for page in range(page_start, page_end + 1):
             if self._stop_flag:
@@ -462,7 +495,7 @@ class CrawlerCore:
             
             self._log(f"正在爬取第 {page} 页...")
             
-            list_url = f"{self.BASE_URL}/list_{page}.htm"
+            list_url = f"{self.BASE_URL}/{url_pattern.format(page=page)}"
             
             video_urls = self._extract_video_urls(list_url)
             if not video_urls:
@@ -499,7 +532,7 @@ class CrawlerCore:
                 return []
             
             pattern = r'href="(video-\d+\.htm)"'
-            matches = re.findall(pattern, resp.text)
+            matches = list(dict.fromkeys(re.findall(pattern, resp.text)))  # 去重保序
             
             urls = [f"{self.BASE_URL}/{m}" for m in matches]
             return urls

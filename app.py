@@ -183,9 +183,11 @@ class App:
         type_frame = ttk.Frame(control_frame)
         type_frame.pack(fill="x", pady=5)
         ttk.Label(type_frame, text="列表类型:").pack(side="left")
-        self.list_type_var = tk.StringVar(value=self.config["list_type"])
-        ttk.Combobox(type_frame, textvariable=self.list_type_var, 
-                    values=["list", "hot"], width=10, state="readonly").pack(side="left", padx=5)
+        self.list_type_var = tk.StringVar(value=self.config.get("list_type", "list"))
+        type_combo = ttk.Combobox(type_frame, textvariable=self.list_type_var, 
+                                  values=["视频", "周榜", "月榜", "5分钟+", "10分钟+"],
+                                  width=10, state="readonly")
+        type_combo.pack(side="left", padx=5)
         
         # 页码范围
         page_frame = ttk.Frame(control_frame)
@@ -438,7 +440,8 @@ class App:
             try:
                 self.crawler.crawl_batch(
                     page_start=self.page_start_var.get(),
-                    page_end=self.page_end_var.get()
+                    page_end=self.page_end_var.get(),
+                    list_type=self.list_type_var.get()
                 )
                 self._status_to_ui(self.crawl_status_text, "\n批量爬取完成")
             except Exception as e:
