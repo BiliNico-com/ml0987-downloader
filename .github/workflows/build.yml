@@ -9,7 +9,7 @@ on:
       - 'crawler_core.py'
       - 'requirements.txt'
       - '.github/workflows/build.yml'
-  workflow_dispatch:  # 手动触发（优先用这个）
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,10 +18,11 @@ jobs:
   build-windows-test:
     runs-on: windows-latest
     env:
-      TEST_ZIP_NAME: ml0987下载器_测试包.zip
+      # 关键：改用纯英文文件名，避免中文乱码
+      TEST_ZIP_NAME: ml0987_downloader_test.zip
     defaults:
       run:
-        shell: cmd  # 全局默认CMD
+        shell: cmd
 
     steps:
       - name: 检出代码
@@ -35,35 +36,30 @@ jobs:
 
       - name: 安装依赖
         run: |
-          :: 升级pip并安装打包依赖
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller>=6.0.0
 
-      - name: 打包EXE（生成ml0987下载器.exe）
+      - name: 打包EXE
         run: |
-          :: 打包为单文件GUI程序
+          # 主程序仍用中文名称（最终用户能看到），仅打包文件用英文
           pyinstaller --onefile --windowed --name "ml0987下载器" app.py
 
       - name: 创建测试包目录
         run: |
-          :: 确保测试包目录存在
           if not exist "dist\test_package" mkdir dist\test_package
 
       - name: 创建FFmpeg临时目录
         run: |
-          :: 单独创建临时目录（纯CMD语法）
           if not exist "ffmpeg_temp" mkdir ffmpeg_temp
 
-      - name: 下载FFmpeg压缩包（纯CMD）
+      - name: 下载FFmpeg压缩包
         run: |
-          :: 下载FFmpeg精简版
           curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
 
-      - name: 解压并复制FFmpeg（单独PowerShell步骤）
-        shell: powershell  # 明确指定用PowerShell执行
+      - name: 解压并复制FFmpeg
+        shell: powershell
         run: |
-          # PowerShell专属语法（这里用#注释没问题）
           Expand-Archive -Path 'ffmpeg_temp\ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force
           $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
           if ($ffmpeg_exe) {
@@ -74,34 +70,32 @@ jobs:
               exit 1
           }
 
-      - name: 整理测试包文件（纯CMD）
+      - name: 整理测试包文件
         run: |
-          :: 复制主程序和依赖说明
           copy dist\ml0987下载器.exe dist\test_package\
           copy requirements.txt dist\test_package\
-          :: 生成简化版配置（测试用）
           echo {"output_dir":"downloads","ffmpeg_path":"","proxy_enabled":false} > dist\test_package\config.json
-          :: 生成测试说明
-          echo === 测试包使用说明 === > dist\test_package\测试说明.txt
-          echo 1. 直接运行ml0987下载器.exe测试 >> dist\test_package\测试说明.txt
-          echo 2. 内置FFmpeg，无需额外下载 >> dist\test_package\测试说明.txt
+          # 说明文件用英文命名（避免乱码），内容仍保留中文
+          echo === 测试包使用说明 === > dist\test_package\readme.txt
+          echo 1. 直接运行ml0987下载器.exe测试 >> dist\test_package\readme.txt
+          echo 2. 内置FFmpeg，无需额外下载 >> dist\test_package\readme.txt
 
-      - name: 压缩测试包（单独PowerShell步骤）
+      - name: 压缩测试包
         shell: powershell
         run: |
-          # 验证文件是否存在
           Write-Host '🔍 测试包目录文件列表：'
           Get-ChildItem -Path 'dist\test_package'
-          # 压缩为测试包
+          # 使用英文变量名，避免中文编码问题
           Compress-Archive -Path 'dist\test_package\*' -DestinationPath "dist\${{ env.TEST_ZIP_NAME }}"
-          # 验证压缩包生成
           Write-Host '🔍 最终生成的文件：'
           Get-ChildItem -Path 'dist'
 
       - name: 上传临时测试包（Artifacts）
         uses: actions/upload-artifact@v4
         with:
-          name: ml0987下载器-临时测试包
+          # Artifacts名称用英文，避免显示乱码
+          name: ml0987-downloader-test-package
+          # 路径用英文变量，100%匹配生成的文件
           path: dist\${{ env.TEST_ZIP_NAME }}
           retention-days: 7
           if-no-files-found: error
