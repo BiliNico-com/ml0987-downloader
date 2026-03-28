@@ -88,19 +88,22 @@ class App:
         self.root = root
         self.root.title("ml0987 视频下载器")
         self.root.geometry("900x650")
-        
+
         # 加载配置
         self.config = load_config()
-        
+
         # 爬虫核心
         self.crawler = None
         self.crawl_thread = None
-        
+
         # 创建 UI
         self._create_widgets()
-        
+
         # 检查环境
         self._check_environment()
+
+        # 检查 ffmpeg.exe
+        self.check_ffmpeg()
     
     def _create_widgets(self):
         """创建界面组件"""
@@ -288,18 +291,33 @@ class App:
     def _check_environment(self):
         """检查运行环境 - 仅检查本地文件"""
         self.env_status_text.delete(1.0, tk.END)
-        
+
         # 仅检查 ffmpeg.exe 是否存在于 APP_DIR 目录下
         ffmpeg_path = APP_DIR / "ffmpeg.exe"
         ffmpeg_found = ffmpeg_path.exists()
-        
+
         self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
         if not ffmpeg_found:
             self._append_status(f"  请将 ffmpeg.exe 放置于: {APP_DIR}", "WARN")
         else:
             self._append_status(f"  路径: {ffmpeg_path}", "OK")
-        
+
         return ffmpeg_found
+
+    def check_ffmpeg(self):
+        """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
+        ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        if not ffmpeg_path.exists():
+            result = messagebox.askyesno(
+                "缺少 ffmpeg.exe",
+                f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
+                f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
+                f"是否跳转到 ffmpeg 官网下载？"
+            )
+            if result:
+                import webbrowser
+                webbrowser.open("https://ffmpeg.org/download.html")
+        return ffmpeg_path.exists()
     
     def _append_status(self, text, status):
         """追加状态信息"""
