@@ -236,14 +236,16 @@ class TSDownloader:
 
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path,
                  headers: dict = None, threads: int = None, key_url: str = None,
-                 progress_callback=None):
+                 progress_callback=None, stop_check=None):
         self.segments = segments
         self.output_file = output_file
         self.headers = headers or DEFAULT_HEADERS
         self.threads = threads or min(32, (os.cpu_count() or 1) + 4)
         self.key_url = key_url
         self.progress_callback = progress_callback
+        self.stop_check = stop_check  # 可调用对象，返回 True 时停止
         self._key_cache: Optional[bytes] = None
+        self._stopped = False
 
     def download(self) -> bool:
         """并发下载并合并"""
@@ -262,6 +264,11 @@ class TSDownloader:
                     completed_count = 0
 
                     for future in as_completed(future_to_index):
+                        if self.stop_check and self.stop_check():
+                            self._stopped = True
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            break
+
                         idx = future_to_index[future]
                         try:
                             results[idx] = future.result()
@@ -271,6 +278,10 @@ class TSDownloader:
                         completed_count += 1
                         if self.progress_callback:
                             self.progress_callback(completed_count, len(self.segments))
+
+                    if self._stopped:
+                        logger.info("下载已中断")
+                        return False
 
                     # 按顺序写入文件
                     for data in results:
@@ -544,7 +555,8 @@ class CrawlerCore:
             parser.segments,
             mp4_file,
             key_url=parser.key_url,
-            progress_callback=lambda c, t: self._progress(c, t)
+            progress_callback=lambda c, t: self._progress(c, t),
+            stop_check=lambda: self._stop_flag,
         )
 
         success = downloader.download()

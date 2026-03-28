@@ -336,6 +336,11 @@ class App:
         self.proxy_pass_var = tk.StringVar(value=self.config["proxy_pass"])
         ttk.Entry(row2, textvariable=self.proxy_pass_var, show="*", width=12).pack(side="left", padx=5)
 
+        # 代理测试按钮
+        btn_row = ttk.Frame(proxy_frame)
+        btn_row.pack(fill="x", padx=5, pady=5)
+        ttk.Button(btn_row, text="测试代理连接", command=self._test_proxy).pack(side="left", padx=5)
+
         # 保存按钮
         btn_frame = ttk.Frame(self.tab_settings)
         btn_frame.pack(fill="x", padx=20, pady=10)
@@ -611,11 +616,6 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
-        # 清空进度
-        self._batch_done_videos = 0
-        self._batch_success = 0
-        self._batch_total_videos = 0
-
         def on_progress(current, total):
             """当前视频的切片进度"""
             pct = f"{current}/{total}" if total > 0 else "?"
@@ -705,8 +705,9 @@ class App:
         """停止任务"""
         if self.crawler:
             self.crawler.stop()
-            if self.crawl_thread and self.crawl_thread.is_alive():
-                self.crawl_thread.join(timeout=5)
+            # 不再在主线程 join，避免卡顿；线程设为 daemon 会自动清理
+            self.crawl_thread = None
+            self.crawler = None
             self._status_to_ui(self.crawl_status_text, "── 已停止 ──")
             self._status_to_ui(self.single_status_text, "── 已停止 ──")
             try:
@@ -714,6 +715,86 @@ class App:
                 self.root.after(0, lambda: self.single_overall_label.config(text="已停止"))
             except Exception:
                 pass
+
+    # ==================== 代理测试 ====================
+
+    def _test_proxy(self):
+        """测试代理连接是否可用"""
+        import requests as req
+
+        host = self.proxy_host_var.get().strip()
+        port = self.proxy_port_var.get().strip()
+        user = self.proxy_user_var.get().strip()
+        passwd = self.proxy_pass_var.get().strip()
+
+        if not host or not port:
+            messagebox.showwarning("提示", "请填写代理主机和端口")
+            return
+
+        # 构建 proxies
+        if user and passwd:
+            proxy_url = f"socks5h://{user}:{passwd}@{host}:{port}"
+        else:
+            proxy_url = f"socks5h://{host}:{port}"
+        proxies = {"http": proxy_url, "https": proxy_url}
+
+        # 弹出结果窗口
+        result_win = tk.Toplevel(self.root)
+        result_win.title("代理测试")
+        result_win.geometry("450x320")
+        result_win.resizable(False, False)
+        result_win.grab_set()
+
+        result_text = scrolledtext.ScrolledText(result_win, height=16, wrap="word", font=("Consolas", 9))
+        result_text.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def append(text, tag=None):
+            if tag:
+                result_text.tag_config(tag, foreground={"green": "#2e7d32", "red": "#c62828", "orange": "#e65100"}.get(tag, "black"))
+                result_text.insert(tk.END, text + "\n", tag)
+            else:
+                result_text.insert(tk.END, text + "\n")
+            result_text.see(tk.END)
+
+        append(f"代理: {proxy_url}\n")
+
+        def run_test():
+            targets = [
+                ("Google", "https://www.google.com"),
+                ("YouTube", "https://www.youtube.com"),
+                ("Twitter/X", "https://x.com"),
+                ("ipinfo.io (出口IP)", "https://ipinfo.io/json"),
+            ]
+
+            for name, url in targets:
+                self.root.after(0, lambda n=name: append(f"正在测试 {n}...", "black"))
+                try:
+                    resp = req.get(url, proxies=proxies, timeout=10, allow_redirects=False)
+                    status = resp.status_code
+                    if name == "ipinfo.io (出口IP)":
+                        self.root.after(0, lambda s=status: append(f"  ✓ {name} — HTTP {s}", "green"))
+                        # 显示IP信息
+                        try:
+                            body = resp.json()
+                            ip = body.get("ip", "?")
+                            country = body.get("country", "?")
+                            self.root.after(0, lambda i=ip, c=country: append(f"    出口IP: {i}，地区: {c}", "green"))
+                        except Exception:
+                            pass
+                    elif 200 <= status < 400:
+                        self.root.after(0, lambda n=name, s=status: append(f"  ✓ {n} — HTTP {s}", "green"))
+                    else:
+                        self.root.after(0, lambda n=name, s=status: append(f"  ✗ {n} — HTTP {s}", "orange"))
+                except req.exceptions.Timeout:
+                    self.root.after(0, lambda n=name: append(f"  ✗ {n} — 超时", "red"))
+                except req.exceptions.ConnectionError as e:
+                    self.root.after(0, lambda n=name: append(f"  ✗ {n} — 连接失败", "red"))
+                except Exception as e:
+                    self.root.after(0, lambda n=name, err=str(e)[:80]: append(f"  ✗ {n} — {err}", "red"))
+
+            self.root.after(0, lambda: append("\n── 测试完成 ──"))
+
+        threading.Thread(target=run_test, daemon=True).start()
 
 
 def main():
