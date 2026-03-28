@@ -104,12 +104,6 @@ class App:
 
         # 检查 ffmpeg.exe
         self._check_ffmpeg()
-
-        # 检查 ffmpeg.exe
-        self._check_ffmpeg()
-
-        # 检查 ffmpeg.exe
-        self._check_ffmpeg()
     
     def _create_widgets(self):
         """创建界面组件"""
@@ -329,21 +323,6 @@ class App:
                 webbrowser.open("https://ffmpeg.org/download.html")
         return ffmpeg_path.exists()
 
-    def _append_status(self, text, status):
-        """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
-        ffmpeg_path = APP_DIR / "ffmpeg.exe"
-        if not ffmpeg_path.exists():
-            result = messagebox.askyesno(
-                "缺少 ffmpeg.exe",
-                f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
-                f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
-                f"是否跳转到 ffmpeg 官网下载？"
-            )
-            if result:
-                import webbrowser
-                webbrowser.open("https://ffmpeg.org/download.html")
-        return ffmpeg_path.exists()
-    
     def _append_status(self, text, status):
         """追加状态信息"""
         color = {"OK": "green", "FAIL": "red", "WARN": "orange"}.get(status, "black")
