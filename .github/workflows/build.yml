@@ -27,10 +27,7 @@ jobs:
         pip install pyinstaller
 
     - name: Build with PyInstaller
-      run: |
-        pyinstaller --onefile --windowed ^
-          --name "ml0987-downloader" ^
-          crawler/app.py
+      run: pyinstaller --onefile --windowed --name "ml0987-downloader" crawler/app.py
 
     - name: Verify build output
       run: |
