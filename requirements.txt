@@ -1,8 +1,4 @@
-selenium>=4.18.0
-webdriver-manager>=4.0.0
-beautifulsoup4>=4.12.0
-lxml>=5.0.0
-requests>=2.31.0
-PySocks>=1.7.1
-pycryptodome>=3.20.0
-pyinstaller>=6.0.0
+requests
+pycryptodome
+Pillow
+pyinstaller

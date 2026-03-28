@@ -215,6 +215,13 @@ class TSDownloader:
 
         except Exception as e:
             logger.error(f"下载失败: {e}")
+            # 清理临时文件
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    logger.info(f"已清理临时文件: {temp_file}")
+            except Exception:
+                pass
             return False
 
     def _download_segment(self, idx: int, url: str, iv: Optional[bytes]) -> Optional[bytes]:
@@ -289,10 +296,11 @@ class CrawlerCore:
 
     BASE_URL = "https://ml0987.xyz"
 
-    def __init__(self, config: dict, log_callback=None, progress_callback=None):
+    def __init__(self, config: dict, log_callback=None, progress_callback=None, info_callback=None):
         self.config = config
         self.log_callback = log_callback
         self.progress_callback = progress_callback
+        self.info_callback = info_callback
         self._stop_flag = False
         self.session = requests.Session()
         self.session.headers.update(DEFAULT_HEADERS)
@@ -425,20 +433,30 @@ class CrawlerCore:
             self._log(f"正在爬取第 {page} 页...")
 
             list_url = f"{self.BASE_URL}/{url_pattern.format(page=page)}"
-            video_urls = self._extract_video_urls(list_url)
-            if not video_urls:
+            video_list = self._extract_video_urls(list_url)
+            if not video_list:
                 self._log(f"第 {page} 页未发现视频", "warn")
                 continue
 
-            self._log(f"发现 {len(video_urls)} 个视频")
+            self._log(f"发现 {len(video_list)} 个视频")
 
-            for idx, url in enumerate(video_urls, 1):
+            for idx, video in enumerate(video_list, 1):
                 if self._stop_flag:
                     break
 
-                self._log(f"[{idx}/{len(video_urls)}] 下载: {url}")
+                url = video["url"]
+                title = video.get("title") or f"第{page}页_第{idx}个"
+                cover = video.get("cover") or ""
 
-                title = f"第{page}页_第{idx}个"
+                self._log(f"[{idx}/{len(video_list)}] {title}")
+                self._log(f"  {url}")
+
+                # 通过 info_callback 传递封面信息给 UI
+                if hasattr(self, 'info_callback') and self.info_callback and cover:
+                    try:
+                        self.info_callback({"title": title, "cover": cover})
+                    except Exception:
+                        pass
 
                 if self.download_single(url, title):
                     total_success += 1
@@ -448,19 +466,35 @@ class CrawlerCore:
         self._log(f"批量爬取完成，成功: {total_success} 个")
         return total_success
 
-    def _extract_video_urls(self, list_url: str) -> List[str]:
-        """提取视频链接"""
+    def _extract_video_urls(self, list_url: str) -> List[dict]:
+        """提取视频链接，返回 [{'url', 'title', 'cover'}, ...]"""
         try:
             resp = http_get(list_url, timeout=15)
             if not resp or resp.status_code != 200:
                 self._log(f"获取列表页失败: HTTP {resp.status_code if resp else '无响应'}", "error")
                 return []
 
-            pattern = r'href="(video-\d+\.htm)"'
-            matches = list(dict.fromkeys(re.findall(pattern, resp.text)))  # 去重保序
+            videos = []
+            seen_ids = set()
 
-            urls = [f"{self.BASE_URL}/{m}" for m in matches]
-            return urls
+            # 提取带封面图的 <a> 标签中的信息（支持单引号和双引号包裹 URL）
+            for m in re.finditer(
+                r'<a[^>]*href="(video-(\d+)\.htm)"[^>]*>\s*<div[^>]*style="[^"]*background-image:\s*url\(["\']([^"\']+)["\']\)[^"]*"\s*title=\s*"([^"]*)"',
+                resp.text
+            ):
+                href, vid, cover, title = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+                # 补全完整 URL（如果是相对路径）
+                if not cover.startswith('http'):
+                    cover = f"https://img.ml0987.com{cover}"
+                if vid not in seen_ids:
+                    seen_ids.add(vid)
+                    videos.append({
+                        "url": f"{self.BASE_URL}/{href}",
+                        "title": title,
+                        "cover": cover,
+                    })
+
+            return videos
 
         except Exception as e:
             self._log(f"提取视频链接失败: {e}", "error")
