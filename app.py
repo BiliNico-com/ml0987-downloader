@@ -286,63 +286,20 @@ class App:
     # ==================== 功能方法 ====================
     
     def _check_environment(self):
-        """检查运行环境"""
+        """检查运行环境 - 仅检查本地文件"""
         self.env_status_text.delete(1.0, tk.END)
         
-        # 检查 Python 依赖
-        missing_deps = []
-        for pkg in ["selenium", "webdriver_manager", "bs4", "lxml", "requests", "PySocks", "pycryptodome"]:
-            try:
-                __import__(pkg.replace("-", "_"))
-            except ImportError:
-                missing_deps.append(pkg)
-        
-        self._append_status(f"✓ Python 依赖检查:", "OK" if not missing_deps else "FAIL")
-        if missing_deps:
-            self._append_status(f"  缺失: {', '.join(missing_deps)}", "FAIL")
-        else:
-            self._append_status("  所有依赖已安装", "OK")
-        
-        # 检查 Chrome
-        chrome_paths = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
-        ]
-        chrome_found = any(Path(p).exists() for p in chrome_paths)
-        self._append_status(f"✓ Chrome 浏览器:", "OK" if chrome_found else "FAIL")
-        if not chrome_found:
-            self._append_status("  未找到 Chrome", "FAIL")
-        
-        # 检查 Edge
-        edge_paths = [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-        ]
-        edge_found = any(Path(p).exists() for p in edge_paths)
-        self._append_status(f"✓ Edge 浏览器:", "OK" if edge_found else "FAIL")
-        if not edge_found:
-            self._append_status("  未找到 Edge", "FAIL")
-        
-        # 检查 ffmpeg
-        ffmpeg_path = self.config["ffmpeg_path"]
-        if not ffmpeg_path or not Path(ffmpeg_path).exists():
-            try:
-                subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-                ffmpeg_found = True
-                ffmpeg_path = "系统 PATH"
-            except:
-                ffmpeg_found = False
-        else:
-            ffmpeg_found = True
+        # 仅检查 ffmpeg.exe 是否存在于 APP_DIR 目录下
+        ffmpeg_path = APP_DIR / "ffmpeg.exe"
+        ffmpeg_found = ffmpeg_path.exists()
         
         self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
         if not ffmpeg_found:
-            self._append_status("  未找到 ffmpeg", "FAIL")
+            self._append_status(f"  请将 ffmpeg.exe 放置于: {APP_DIR}", "WARN")
         else:
             self._append_status(f"  路径: {ffmpeg_path}", "OK")
         
-        return not missing_deps and (chrome_found or edge_found) and ffmpeg_found
+        return ffmpeg_found
     
     def _append_status(self, text, status):
         """追加状态信息"""
