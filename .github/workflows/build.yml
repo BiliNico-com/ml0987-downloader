@@ -1,55 +1,115 @@
-# 找到 _check_environment 方法，替换为以下代码
-def _check_environment(self):
-    """检查运行环境 - 支持自动识别同目录 ffmpeg.exe"""
-    self.env_status_text.delete(1.0, tk.END)
+# .github/workflows/build.yml
+name: 自动编译 ml0987 视频下载器
 
-    # 优先检查 EXE 同目录（打包后 EXE 所在目录）
-    if getattr(sys, 'frozen', False):
-        # 打包后的运行目录
-        app_path = Path(sys.executable).parent
-    else:
-        # 开发环境目录
-        app_path = APP_DIR
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app.py'
+      - 'crawler_core.py'
+      - 'requirements.txt'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
 
-    # 检查 ffmpeg.exe
-    ffmpeg_paths = [
-        app_path / "ffmpeg.exe",
-        APP_DIR / "ffmpeg.exe",
-        Path(self.config.get("ffmpeg_path", ""))
-    ]
-    ffmpeg_found = False
-    ffmpeg_actual_path = ""
-    for path in ffmpeg_paths:
-        if path.exists() and path.is_file():
-            ffmpeg_found = True
-            ffmpeg_actual_path = str(path)
-            break
+permissions:
+  contents: write
 
-    self._append_status(f"✓ ffmpeg:", "OK" if ffmpeg_found else "FAIL")
-    if not ffmpeg_found:
-        self._append_status(f"  请将 ffmpeg.exe 放置于: {app_path}", "WARN")
-    else:
-        self._append_status(f"  路径: {ffmpeg_actual_path}", "OK")
-
-    return ffmpeg_found
-
-# 同时修改 check_ffmpeg 方法（如果用户删除了 ffmpeg.exe 时提示）
-def check_ffmpeg(self):
-    """检查 ffmpeg.exe 是否存在，缺失时询问用户是否下载"""
-    if getattr(sys, 'frozen', False):
-        app_path = Path(sys.executable).parent
-    else:
-        app_path = APP_DIR
+jobs:
+  build-windows:
+    runs-on: windows-latest
     
-    ffmpeg_path = app_path / "ffmpeg.exe"
-    if not ffmpeg_path.exists():
-        result = messagebox.askyesno(
-            "缺少 ffmpeg.exe",
-            f"检测到程序目录下缺少 ffmpeg.exe 文件。\n\n"
-            f"程序需要 ffmpeg.exe 才能正常工作。\n\n"
-            f"是否跳转到 ffmpeg 官网下载？"
-        )
-        if result:
-            import webbrowser
-            webbrowser.open("https://ffmpeg.org/download.html")
-    return ffmpeg_path.exists()
+    steps:
+      # 1. 检出代码
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
+      
+      # 2. 设置 Python 环境
+      - name: 配置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      
+      # 3. 安装依赖
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller>=6.0.0
+      
+      # 4. 打包为单个 EXE
+      - name: 打包为单个 EXE
+        run: |
+          pyinstaller --onefile --windowed --name "ml0987下载器" app.py
+        shell: cmd
+      
+      # 5. 自动下载 Windows 版 ffmpeg（关键新增步骤）
+      - name: 下载并解压 ffmpeg
+        run: |
+          # 创建 ffmpeg 临时目录
+          mkdir -p ffmpeg_temp
+          # 下载 Windows 版 ffmpeg（精简版，仅含 exe）
+          curl -L -o ffmpeg_temp/ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          # 解压并提取 ffmpeg.exe
+          powershell -Command "Expand-Archive -Path ffmpeg_temp/ffmpeg.zip -DestinationPath ffmpeg_temp -Force"
+          # 查找 ffmpeg.exe 并复制到打包目录
+          $ffmpeg_path = Get-ChildItem -Path ffmpeg_temp -Name ffmpeg.exe -Recurse | Select-Object -First 1
+          if ($ffmpeg_path) {
+              copy "ffmpeg_temp\$ffmpeg_path" dist\package\ffmpeg.exe
+              echo "✅ ffmpeg.exe 已找到并复制"
+          } else {
+              echo "❌ 未找到 ffmpeg.exe"
+              exit 1
+          }
+      
+      # 6. 整理产物（包含 ffmpeg.exe + 配置模板 + 使用说明）
+      - name: 整理产物
+        run: |
+          # 创建输出目录
+          mkdir -p dist/package
+          # 复制 EXE
+          copy dist\ml0987下载器.exe dist\package\
+          # 复制依赖说明、README
+          copy requirements.txt dist\package\
+          if exist README.md copy README.md dist\package\
+          # 创建 config.json 模板（避免运行时缺失）
+          echo {
+          echo   "output_dir": "downloads",
+          echo   "ffmpeg_path": "",
+          echo   "proxy_enabled": false,
+          echo   "proxy_host": "127.0.0.1",
+          echo   "proxy_port": "1080",
+          echo   "proxy_user": "",
+          echo   "proxy_pass": "",
+          echo   "headless": true,
+          echo   "list_type": "list",
+          echo   "page_start": 1,
+          echo   "page_end": 3
+          echo } > dist\package\config.json
+          # 生成使用说明
+          echo "=== ml0987 视频下载器 使用说明 ===" > dist\package\使用说明.txt
+          echo "1. 直接运行 ml0987下载器.exe 即可（已内置 ffmpeg.exe）" >> dist\package\使用说明.txt
+          echo "2. 下载的视频默认保存在同目录的 downloads 文件夹" >> dist\package\使用说明.txt
+          echo "3. 如需代理，在「设置」Tab 配置 SOCKS5 代理信息" >> dist\package\使用说明.txt
+          echo "4. 批量爬取支持页码范围，单视频下载直接输入 URL 即可" >> dist\package\使用说明.txt
+      
+      # 7. 压缩产物（包含 EXE + ffmpeg.exe + 配置模板）
+      - name: 压缩为 ZIP 包
+        run: |
+          Compress-Archive -Path dist\package\* -DestinationPath dist\ml0987下载器_${{ github.run_id }}.zip
+      
+      # 8. 上传 Release
+      - name: 创建 Release 并上传产物
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_id }}
+          name: 自动构建_${{ github.run_id }}
+          body: |
+            📦 自动编译的 ml0987 视频下载器（Windows 版）
+            - 构建时间：${{ github.run_at }}
+            - 包含文件：下载器 EXE + ffmpeg.exe + 配置模板
+            - 无需手动下载 ffmpeg，解压后直接运行即可
+          files: |
+            dist\ml0987下载器_${{ github.run_id }}.zip
+          draft: false
+          prerelease: false
