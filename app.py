@@ -48,6 +48,8 @@ DEFAULT_CONFIG = {
     "list_type": "list",
     "page_start": 1,
     "page_end": 3,
+    "title_with_author": True,
+    "sort_by_upload_date": True,
 }
 
 # ==================== 日志 ====================
@@ -393,6 +395,18 @@ class App:
         entry.pack(fill="x", padx=5, pady=5)
         ttk.Button(dir_frame, text="选择目录...", command=self._browse_dir).pack(anchor="w", padx=5, pady=5)
 
+        # 下载设置
+        download_frame = ttk.LabelFrame(self.tab_settings, text="下载设置", padding=10)
+        download_frame.pack(fill="x", padx=20, pady=10)
+
+        self.title_with_author_var = tk.BooleanVar(value=self.config.get("title_with_author", True))
+        ttk.Checkbutton(download_frame, text="标题包含上传者（标题 - 作者名）",
+                        variable=self.title_with_author_var).pack(anchor="w", padx=5, pady=3)
+
+        self.sort_by_upload_date_var = tk.BooleanVar(value=self.config.get("sort_by_upload_date", True))
+        ttk.Checkbutton(download_frame, text="按视频上传日期分类（关闭则全部存到下载当天）",
+                        variable=self.sort_by_upload_date_var).pack(anchor="w", padx=5, pady=3)
+
         # 代理设置
         proxy_frame = ttk.LabelFrame(self.tab_settings, text="SOCKS5 代理（可选）", padding=10)
         proxy_frame.pack(fill="x", padx=20, pady=10)
@@ -638,6 +652,8 @@ class App:
     def _save_settings(self):
         self.config["output_dir"] = self.save_dir_var.get()
         self.config["site"] = self.site_var.get()
+        self.config["title_with_author"] = self.title_with_author_var.get()
+        self.config["sort_by_upload_date"] = self.sort_by_upload_date_var.get()
         self.config["proxy_enabled"] = self.proxy_enabled_var.get()
         self.config["proxy_host"] = self.proxy_host_var.get()
         self.config["proxy_port"] = self.proxy_port_var.get()

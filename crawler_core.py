@@ -540,6 +540,21 @@ class CrawlerCore:
                 return dt.strftime("%Y-%m-%d")
         return None
 
+    def _extract_author_from_html(self, video_url: str) -> Optional[str]:
+        """从视频详情页提取上传者名称"""
+        resp = http_get(video_url, timeout=15)
+        if not resp or resp.status_code != 200:
+            return None
+        # 匹配 "作者：<a ...>名字</a>"
+        match = re.search(r'作者[：:]\s*<a[^>]*>([^<]+)</a>', resp.text)
+        if match:
+            return match.group(1).strip()
+        # 兜底：纯文本 "作者：xxx"（无链接）
+        match = re.search(r'作者[：:]\s*([^\s<]+)', resp.text)
+        if match:
+            return match.group(1).strip()
+        return None
+
     # ==================== 单视频下载 ====================
 
     def download_single(self, url: str, title: str = None, video_id: str = None, upload_date: str = None, output_dir: Path = None) -> bool:
@@ -576,6 +591,12 @@ class CrawlerCore:
         if not title:
             title = self._extract_title_from_html(url) or f"视频_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # 标题加上传者（可选）
+        if self.config.get("title_with_author"):
+            author = self._extract_author_from_html(url)
+            if author and author not in title:
+                title = f"{title} - {author}"
+
         # 如果没有传入上传日期，尝试从详情页提取
         if not upload_date:
             upload_date = self._extract_upload_date_from_html(url)
@@ -583,8 +604,12 @@ class CrawlerCore:
         if not output_dir:
             output_dir = Path(self.config.get("output_dir", "downloads"))
 
-        # 按上传日期分类存储，如果没有日期则用下载当天日期
-        date_str = upload_date or datetime.now().strftime("%Y-%m-%d")
+        # 日期分类：启用按上传日期，否则全部存到下载当天
+        if self.config.get("sort_by_upload_date", True):
+            date_str = upload_date or datetime.now().strftime("%Y-%m-%d")
+        else:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+
         date_dir = output_dir / date_str
         mp4_file = date_dir / f"{sanitize_filename(title)}.mp4"
 
