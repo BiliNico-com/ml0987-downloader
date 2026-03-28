@@ -17,103 +17,80 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    
+    defaults:
+      run:
+        shell: cmd  # 全局用CMD，彻底避免PowerShell语法冲突
+
     steps:
-      # 1. 检出代码
       - name: 检出仓库代码
         uses: actions/checkout@v4
-      
-      # 2. 设置 Python 环境
+
       - name: 配置 Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
-      
-      # 3. 安装依赖
-      - name: 安装 Python 依赖
+
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller>=6.0.0
-      
-      # 4. 打包为单个 EXE
+
       - name: 打包为单个 EXE
+        run: pyinstaller --onefile --windowed --name "ml0987下载器" app.py
+
+      # 提前创建产物目录（必须）
+      - name: 创建打包目录
+        run: if not exist "dist\package" mkdir dist\package
+
+      # 核心修复：将PowerShell命令写成单行，避免换行符解析错误
+      - name: 下载并复制FFmpeg（单行PowerShell命令）
         run: |
-          pyinstaller --onefile --windowed --name "ml0987下载器" app.py
-        shell: cmd
-      
-      # 5. 提前创建产物目录（核心修复：解决路径不存在问题）
-      - name: 提前创建打包目录
-        run: |
-          mkdir -p dist\package
-        shell: cmd
-      
-      # 6. 自动下载 Windows 版 ffmpeg（优化路径查找）
-      - name: 下载并解压 ffmpeg
-        run: |
-          # 创建 ffmpeg 临时目录
-          mkdir -p ffmpeg_temp
-          # 下载 Windows 版 ffmpeg 精简版
-          curl -L -o ffmpeg_temp/ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-          # 解压并提取 ffmpeg.exe（优化路径查找）
-          powershell -Command "Expand-Archive -Path ffmpeg_temp/ffmpeg.zip -DestinationPath ffmpeg_temp -Force; `
-          $ffmpeg_path = Get-ChildItem -Path ffmpeg_temp -Filter ffmpeg.exe -Recurse | Select-Object -First 1; `
-          if ($ffmpeg_path) { `
-              Copy-Item -Path $ffmpeg_path.FullName -Destination dist\package\ffmpeg.exe -Force; `
-              Write-Host '✅ ffmpeg.exe 已复制到打包目录'; `
-          } else { `
-              Write-Error '❌ 未找到 ffmpeg.exe'; `
-              exit 1; `
-          }"
-      
-      # 7. 整理产物（包含 ffmpeg.exe + 配置模板 + 使用说明）
+          mkdir ffmpeg_temp 2>nul
+          curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          # 单行PowerShell命令（无换行符，避免语法错误）
+          powershell -Command "Expand-Archive -Path 'ffmpeg_temp\ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force; $ffmpeg_exe = Get-ChildItem -Path 'ffmpeg_temp' -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1; if ($ffmpeg_exe) { Copy-Item -Path $ffmpeg_exe.FullName -Destination 'dist\package\ffmpeg.exe' -Force; Write-Host '✅ ffmpeg.exe复制成功' } else { Write-Error '❌ 未找到ffmpeg.exe'; exit 1 }"
+
       - name: 整理产物
         run: |
-          # 复制 EXE 到打包目录
           copy dist\ml0987下载器.exe dist\package\
-          # 复制依赖说明、README
           copy requirements.txt dist\package\
           if exist README.md copy README.md dist\package\
-          # 创建 config.json 模板
-          echo {
-          echo   "output_dir": "downloads",
-          echo   "ffmpeg_path": "",
-          echo   "proxy_enabled": false,
-          echo   "proxy_host": "127.0.0.1",
-          echo   "proxy_port": "1080",
-          echo   "proxy_user": "",
-          echo   "proxy_pass": "",
-          echo   "headless": true,
-          echo   "list_type": "list",
-          echo   "page_start": 1,
-          echo   "page_end": 3
-          echo } > dist\package\config.json
+          # 生成config.json
+          echo { > dist\package\config.json
+          echo   "output_dir": "downloads", >> dist\package\config.json
+          echo   "ffmpeg_path": "", >> dist\package\config.json
+          echo   "proxy_enabled": false, >> dist\package\config.json
+          echo   "proxy_host": "127.0.0.1", >> dist\package\config.json
+          echo   "proxy_port": "1080", >> dist\package\config.json
+          echo   "proxy_user": "", >> dist\package\config.json
+          echo   "proxy_pass": "", >> dist\package\config.json
+          echo   "headless": true, >> dist\package\config.json
+          echo   "list_type": "list", >> dist\package\config.json
+          echo   "page_start": 1, >> dist\package\config.json
+          echo   "page_end": 3 >> dist\package\config.json
+          echo } >> dist\package\config.json
           # 生成使用说明
-          echo "=== ml0987 视频下载器 使用说明 ===" > dist\package\使用说明.txt
-          echo "1. 直接运行 ml0987下载器.exe 即可（已内置 ffmpeg.exe）" >> dist\package\使用说明.txt
-          echo "2. 下载的视频默认保存在同目录的 downloads 文件夹" >> dist\package\使用说明.txt
-          echo "3. 如需代理，在「设置」Tab 配置 SOCKS5 代理信息" >> dist\package\使用说明.txt
-          echo "4. 批量爬取支持页码范围，单视频下载直接输入 URL 即可" >> dist\package\使用说明.txt
-        shell: cmd
-      
-      # 8. 压缩产物
-      - name: 压缩为 ZIP 包
-        run: |
-          Compress-Archive -Path dist\package\* -DestinationPath dist\ml0987下载器_${{ github.run_id }}.zip
-      
-      # 9. 上传 Release
-      - name: 创建 Release 并上传产物
+          echo === ml0987视频下载器 使用说明 === > dist\package\使用说明.txt
+          echo 1. 解压后直接运行ml0987下载器.exe（已内置FFmpeg） >> dist\package\使用说明.txt
+          echo 2. 视频默认保存到同目录downloads文件夹 >> dist\package\使用说明.txt
+          echo 3. 代理仅支持SOCKS5，在「设置」标签页配置 >> dist\package\使用说明.txt
+
+      - name: 压缩为ZIP包
+        shell: powershell
+        run: Compress-Archive -Path "dist\package\*" -DestinationPath "dist\ml0987下载器_${{ github.run_id }}.zip"
+
+      - name: 上传Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_id }}
+          tag_name: build-${{ github.run_id }}
           name: 自动构建_${{ github.run_id }}
           body: |
-            📦 自动编译的 ml0987 视频下载器（Windows 版）
+            📦 ml0987视频下载器 Windows版
             - 构建时间：${{ github.run_at }}
-            - 包含文件：下载器 EXE + ffmpeg.exe + 配置模板
-            - 无需手动下载 ffmpeg，解压后直接运行即可
-          files: |
-            dist\ml0987下载器_${{ github.run_id }}.zip
+            - 包含：主程序+FFmpeg+配置文件
+            - 解压即运行，无需额外依赖
+          files: dist\ml0987下载器_${{ github.run_id }}.zip
           draft: false
           prerelease: false
