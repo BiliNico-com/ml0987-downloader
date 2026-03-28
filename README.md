@@ -1,125 +1,119 @@
-# ml0987.xyz 视频下载器 - GUI 版
+# ml0987 视频下载器 - GUI 版本
+
+## 功能特点
+
+- **自动 ffmpeg 检查**：程序启动时自动检查 ffmpeg.exe 是否存在，缺失时提示用户前往官网下载
+- **一键依赖安装**：集成 Python 依赖安装功能，支持一键安装所有必要依赖
+- **批量爬取功能**：支持批量爬取视频，可设置页码范围和列表类型
+- **单个视频下载**：支持单个视频 URL 下载，可自定义标题
+- **实时进度显示**：提供实时进度显示和日志输出
+- **代理支持**：支持 SOCKS5 代理配置
+- **GitHub Actions 构建**：通过 GitHub Actions 自动编译生成 .exe 文件
+
+## 环境要求
+
+- Python 3.8+
+- tkinter（GUI 界面）
+- ffmpeg.exe（必需，用于视频处理）
+
+## 快速开始
+
+### 方式一：直接运行（需要 Python 环境）
+
+1. 安装依赖
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. 下载 ffmpeg
+   - 访问 [ffmpeg 官网](https://ffmpeg.org/download.html) 下载 Windows 版本
+   - 解压后，将 `ffmpeg.exe` 复制到程序根目录
+
+3. 启动 GUI
+   ```bash
+   python app.py
+   ```
+
+### 方式二：下载编译好的 .exe（推荐）
+
+1. 访问 [GitHub Releases](https://github.com/yourusername/your-repo/releases) 页面
+2. 下载最新的 .exe 安装包
+3. 双击运行即可使用（无需安装 Python）
+
+## 界面功能说明
+
+### ✅ 环境检测
+
+- 自动检测 ffmpeg.exe 是否存在
+- 缺失时显示提示框，询问是否跳转到官网下载
+- 一键安装 Python 依赖
+
+### 📋 批量爬取
+
+- 选择爬取类型：最新 / 最热
+- 设置起止页码
+- 显示实时进度
+
+### 🔗 单视频
+
+- 支持单个视频 URL 下载
+- 可自定义视频标题
+
+### ⚙️ 设置
+
+- 配置保存目录
+- 选择浏览器
+- 配置 SOCKS5 代理
+
+### 📄 日志
+
+- 实时显示运行日志
+- 支持清空日志
+
+## GitHub Actions 构建
+
+项目已配置 GitHub Actions，可通过以下步骤自动构建 .exe 文件：
+
+1. 将代码推送到 GitHub 仓库
+2. GitHub Actions 会自动触发构建流程
+3. 构建完成后，.exe 文件将上传到 Releases 页面
+
+## 常见问题
+
+**Q: 如何下载 ffmpeg？**
+- 访问 [ffmpeg 官网](https://ffmpeg.org/download.html) 下载 Windows 版本
+- 解压后，将 `ffmpeg.exe` 复制到程序根目录
+
+**Q: 程序启动时提示缺少 ffmpeg.exe 怎么办？**
+- 点击提示框中的 "是" 按钮，会自动打开 ffmpeg 官网
+- 下载完成后，将 `ffmpeg.exe` 放置在程序根目录
+
+**Q: 如何构建 .exe 文件？**
+- 将代码推送到 GitHub 仓库
+- GitHub Actions 会自动构建
+- 构建完成后，可在 Releases 页面下载
+
+**Q: 代理设置不生效怎么办？**
+- 确认本地代理软件已启动
+- 端口设置正确（Clash 默认 7891，v2ray 默认 1080）
+- 注意：部分代理软件默认只提供 HTTP 代理，需在软件内开启 SOCKS5
+
+**Q: 打包后的 .exe 文件被杀毒软件误报怎么办？**
+- 这是 PyInstaller 打包程序的常见问题
+- 可以将 .exe 文件添加到杀毒软件白名单
+- 或在虚拟机中运行
 
 ## 文件说明
 
 ```
 crawler/
 ├── app.py            ← GUI 主程序（直接运行此文件）
-├── crawler_core.py   ← 爬虫核心（CDP嗅探 + ffmpeg转码）
+├── crawler_core.py   ← 爬虫核心（CDP 嗅探 + ffmpeg 转码）
 ├── requirements.txt  ← Python 依赖
 ├── build.bat         ← 一键打包为 .exe（Windows）
 └── README.md         ← 本文件
 ```
 
----
+## 许可证
 
-## 🚀 快速开始（两种方式）
-
-### 方式一：直接运行（需要 Python 环境）
-
-```bash
-# 1. 安装依赖
-pip install -r requirements.txt
-
-# 2. 启动 GUI
-python app.py
-```
-
-### 方式二：打包为 .exe（用户无需安装 Python）
-
-```bash
-# 双击运行（Windows）
-build.bat
-
-# 完成后进入 dist/ml0987下载器/ 目录
-# 双击 ml0987下载器.exe 即可
-```
-
----
-
-## 界面功能说明
-
-### ✅ 环境检测
-- 自动检测所有依赖是否就绪
-- **一键安装 Python 依赖**（selenium / webdriver-manager / beautifulsoup4 等）
-- **下载 ffmpeg** 引导按钮，自动打开下载页
-
-### 📋 批量爬取
-- 选择爬取类型：最新 / 最热
-- 设置起止页码、嗅探等待时间
-- 显示实时进度
-
-### 🔗 单视频
-- 粘贴一个或多个视频页 URL（每行一个）
-- 支持直接粘贴 m3u8 URL 转码
-
-### ⚙️ 设置
-| 功能 | 说明 |
-|------|------|
-| 📁 保存目录 | 自定义视频保存位置，按「转码日期/视频标题」自动分类 |
-| 🔧 ffmpeg 路径 | 指定 ffmpeg.exe 位置，留空自动探测 |
-| 🌐 SOCKS5 代理 | 网站无法直接访问时启用，支持 v2ray/Clash/SS 本地代理 |
-
-### 📄 日志
-- 实时滚动日志
-- 颜色区分：成功（绿）/ 警告（黄）/ 错误（红）
-- 支持复制全部日志
-
----
-
-## SOCKS5 代理设置
-
-进入「设置」页，启用代理并填写：
-
-| 参数 | 示例 |
-|------|------|
-| 主机 | `127.0.0.1` |
-| 端口 | `1080`（v2ray/Clash 默认）|
-| 用户名/密码 | 无需认证则留空 |
-
-> 本工具通过 `--proxy-server=socks5://...` 参数将代理注入 Chrome，  
-> 因此浏览器所有流量（包括视频请求）都会走代理。
-
----
-
-## 输出目录结构
-
-```
-downloads/
-└── 2026-03-29/                     ← 转码日期
-    ├── 视频标题A/
-    │   └── 视频标题A.mp4
-    └── 视频标题B/
-        └── 视频标题B.mp4
-```
-
----
-
-## ffmpeg 安装（Windows 便携版）
-
-1. 下载：https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
-2. 解压后，将 `bin/ffmpeg.exe` 复制到程序目录下的 `ffmpeg/` 文件夹：
-   ```
-   ml0987下载器/
-   └── ffmpeg/
-       └── ffmpeg.exe    ← 放这里
-   ```
-3. 程序启动时会自动检测此路径
-
----
-
-## 常见问题
-
-**Q: 嗅探不到 m3u8？**  
-→ 在「批量爬取」或「单视频」页将「嗅探等待」时间调大（如 30 秒），  
-  或取消勾选「无头模式」观察浏览器实际打开情况。
-
-**Q: 提示 Chrome not found？**  
-→ 安装 Google Chrome：https://www.google.cn/intl/zh-CN/chrome/
-
-**Q: 代理不生效？**  
-→ 确认本地代理软件已启动，端口匹配（Clash 默认 7891，v2ray 默认 1080）。  
-  注意：部分代理软件默认只提供 HTTP 代理，需在软件内开启 SOCKS5。
-
-**Q: 打包后 .exe 杀毒软件报警？**  
-→ PyInstaller 打包的程序常被误报，可添加白名单或在虚拟机中运行。
+MIT License
