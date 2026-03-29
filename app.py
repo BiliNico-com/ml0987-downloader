@@ -712,6 +712,10 @@ class App:
 
         threading.Thread(target=run, daemon=True).start()
 
+    # 封面缩略图尺寸（像素）
+    THUMB_W = 160
+    THUMB_H = 100
+
     def _show_single_videos(self, videos):
         """在网格中显示视频列表"""
         self._single_videos = videos
@@ -724,42 +728,55 @@ class App:
 
         # 计算列数（根据窗口宽度自适应，默认 3 列）
         cols = 3
+        tw, th = self.THUMB_W, self.THUMB_H
         for idx, video in enumerate(videos):
             row_idx = idx // cols
             col_idx = idx % cols
 
             # 卡片 Frame
             card = ttk.Frame(self.single_inner_frame, relief="groove", borderwidth=1)
-            card.grid(row=row_idx, column=col_idx, padx=5, pady=5, sticky="nsew")
+            card.grid(row=row_idx, column=col_idx, padx=8, pady=8, sticky="nsew")
             self.single_inner_frame.columnconfigure(col_idx, weight=1)
 
-            # 勾选框
+            # 勾选框变量
             var = tk.BooleanVar(value=True)
             self._single_check_vars.append((var, video))
             cb = ttk.Checkbutton(card, variable=var)
-            cb.grid(row=0, column=0, sticky="ne", padx=2, pady=2)
+            cb.grid(row=0, column=0, sticky="ne", padx=3, pady=3)
 
-            # 封面图
-            cover_label = tk.Label(card, width=16, height=9, bg="#e0e0e0",
-                                   text="加载中...", font=("Arial", 8), fg="#999")
-            cover_label.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=2, pady=(0, 2))
+            # 封面图占位 Label（用 placeholder 图片撑出 160x100 像素）
+            placeholder = tk.PhotoImage(width=tw, height=th)
+            self._single_thumb_refs.append(placeholder)
+            cover_label = tk.Label(card, image=placeholder, bg="#e0e0e0",
+                                   text="加载中...", compound="center",
+                                   font=("Arial", 9), fg="#999",
+                                   cursor="hand2")
+            cover_label.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=3, pady=(0, 3))
 
             # 标题
-            title_label = tk.Label(card, text=video.get("title", "")[:30],
-                                   font=("Arial", 8), wraplength=140, justify="left",
-                                   anchor="w")
-            title_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 4))
+            title_label = tk.Label(card, text=video.get("title", "")[:50],
+                                   font=("Arial", 9), wraplength=240, justify="left",
+                                   anchor="w", cursor="hand2")
+            title_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=(0, 5))
 
             # 异步加载封面
             cover_url = video.get("cover", "")
             if cover_url:
                 threading.Thread(target=self._load_single_cover,
-                                 args=(cover_url, cover_label), daemon=True).start()
+                                 args=(cover_url, cover_label, tw, th), daemon=True).start()
+
+            # 绑定整个卡片的点击事件来切换勾选
+            def toggle_check(event, v=var):
+                v.set(not v.get())
+
+            cover_label.bind("<Button-1>", toggle_check)
+            title_label.bind("<Button-1>", toggle_check)
+            card.bind("<Button-1>", toggle_check)
 
         self.single_select_all_var.set(True)
 
-    def _load_single_cover(self, url, label):
-        """异步加载封面图"""
+    def _load_single_cover(self, url, label, tw=160, th=100):
+        """异步加载封面图，缩放到 tw x th 像素"""
         try:
             import urllib.request
             from io import BytesIO
@@ -768,10 +785,10 @@ class App:
                 data = BytesIO(resp.read())
             from PIL import Image, ImageTk
             img = Image.open(data)
-            img.thumbnail((160, 90))
+            img = img.resize((tw, th), Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
             self._single_thumb_refs.append(photo)  # 防止 GC
-            self.root.after(0, lambda: label.configure(image=photo, text="", bg="white"))
+            self.root.after(0, lambda: label.configure(image=photo, text=""))
         except Exception:
             self.root.after(0, lambda: label.configure(text="封面\n加载失败", bg="#f0f0f0"))
 
