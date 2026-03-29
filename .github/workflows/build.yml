@@ -1,25 +1,24 @@
 # .github/workflows/build.yml
-name: 编译测试 - 生成临时包
+name: 编译发布 - 发布到 GitHub Releases
 
 on:
   push:
-    branches: [ main ]
-    paths:
-      - 'app.py'
-      - 'crawler_core.py'
-      - 'socks.py'
-      - 'requirements.txt'
-      - '.github/workflows/build.yml'
+    tags:
+      - 'v*'    # 推送 v1.0.0 等格式的 tag 时触发
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本号（如 v1.2.0），留空则使用日期'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-windows-test:
+  build-and-release:
     runs-on: windows-latest
     env:
-      TEST_ZIP_NAME: ml0987_downloader_test.zip
       APP_NAME: ml0987_downloader
       PYTHONIOENCODING: utf-8
       LC_ALL: C.UTF-8
@@ -28,6 +27,26 @@ jobs:
         shell: cmd
 
     steps:
+      - name: 确定版本号
+        id: version
+        shell: powershell
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $ver = "${{ github.ref }}".Substring(11)
+            echo "TAG=v$ver" >> $env:GITHUB_OUTPUT
+            echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+          } elseif ("${{ github.event.inputs.tag }}") {
+            $tag = "${{ github.event.inputs.tag }}"
+            if ($tag -notmatch '^v') { $tag = "v$tag" }
+            echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+            echo "VERSION=$($tag -replace '^v','')" >> $env:GITHUB_OUTPUT
+          } else {
+            $date = Get-Date -Format "yyyyMMdd"
+            echo "TAG=v$date" >> $env:GITHUB_OUTPUT
+            echo "VERSION=$date" >> $env:GITHUB_OUTPUT
+          }
+          echo "Version: ${{ steps.version.outputs.TAG }}"
+
       - name: 检出代码
         uses: actions/checkout@v4
 
@@ -47,12 +66,9 @@ jobs:
         run: |
           pyinstaller --noconfirm --onedir --windowed --contents-directory Core --name "%APP_NAME%" --add-data "crawler_core.py;." --add-data "socks.py;." --hidden-import PIL --hidden-import PIL.ImageTk --hidden-import PIL.WebPImagePlugin --hidden-import Crypto.Cipher --collect-all Pillow --collect-all pycryptodome app.py
 
-      - name: 创建FFmpeg临时目录
-        run: |
-          if not exist "ffmpeg_temp" mkdir ffmpeg_temp
-
       - name: 下载FFmpeg压缩包
         run: |
+          if not exist "ffmpeg_temp" mkdir ffmpeg_temp
           curl -L -o ffmpeg_temp\ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
 
       - name: 解压并复制FFmpeg
@@ -74,19 +90,34 @@ jobs:
           copy README.md "dist\%APP_NAME%\"
           echo {"output_dir":"downloads","ffmpeg_path":"","proxy_enabled":false} > "dist\%APP_NAME%\config.json"
 
-      - name: 压缩测试包
+      - name: 打包ZIP
         shell: powershell
         run: |
           Write-Host 'Package files:'
           Get-ChildItem -Path "dist\$env:APP_NAME"
-          Compress-Archive -Path "dist\$env:APP_NAME\*" -DestinationPath "dist\$env:TEST_ZIP_NAME"
-          Write-Host 'Final generated files:'
-          Get-ChildItem -Path 'dist'
+          Compress-Archive -Path "dist\$env:APP_NAME\*" -DestinationPath "dist\ml0987_downloader_${{ steps.version.outputs.VERSION }}.zip"
 
-      - name: 上传临时测试包（Artifacts）
-        uses: actions/upload-artifact@v4
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v2
         with:
-          name: ml0987-downloader-test-package
-          path: dist\${{ env.TEST_ZIP_NAME }}
-          retention-days: 7
-          if-no-files-found: error
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: ${{ steps.version.outputs.TAG }}
+          body: |
+            ## hsex 视频下载器 ${{ steps.version.outputs.TAG }}
+
+            ### 下载
+            解压后直接运行 `ml0987_downloader.exe`，内置 ffmpeg，无需额外配置。
+
+            ### 功能
+            - 批量爬取（视频/周榜/月榜/5分钟+/10分钟+）
+            - 关键词搜索下载
+            - 搜索作者并批量下载（自动归档到作者目录）
+            - 自动检测作者总页数
+            - 按视频上传日期分类
+            - 防重复下载
+            - 多域名 + SOCKS5 代理
+            - 封面预览 + 切片进度
+          files: |
+            dist/ml0987_downloader_${{ steps.version.outputs.VERSION }}.zip
+          draft: false
+          prerelease: false
