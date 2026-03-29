@@ -613,6 +613,43 @@ class App:
 
         ttk.Button(action_frame, text="▶ 下载选中", command=self._start_single_batch).pack(side="right", padx=5)
 
+        # ---- 进度区（放在操作栏下方，随时可见） ----
+        progress_frame = ttk.LabelFrame(self.tab_single, text="下载进度", padding=8)
+        progress_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        self.single_overall_label = tk.Label(progress_frame, text="就绪",
+                                              font=("Arial", 9), anchor="w")
+        self.single_overall_label.pack(fill="x")
+
+        prog_row = ttk.Frame(progress_frame)
+        prog_row.pack(fill="x", pady=(3, 0))
+        ttk.Label(prog_row, text="切片:", width=5).pack(side="left")
+        self.single_progress = ttk.Progressbar(prog_row, mode="determinate")
+        self.single_progress.pack(side="left", fill="x", expand=True)
+        self.single_slice_label = tk.Label(prog_row, text="", font=("Consolas", 9), fg="#555", width=15)
+        self.single_slice_label.pack(side="left")
+
+        merge_row = ttk.Frame(progress_frame)
+        merge_row.pack(fill="x", pady=(3, 0))
+        ttk.Label(merge_row, text="合并:", width=5).pack(side="left")
+        self.single_merge_progress = ttk.Progressbar(merge_row, mode="determinate")
+        self.single_merge_progress.pack(side="left", fill="x", expand=True)
+        self.single_merge_label = tk.Label(merge_row, text="", font=("Consolas", 9), fg="#888", width=15)
+        self.single_merge_label.pack(side="left")
+
+        # 日志（折叠在进度区下方，默认收起）
+        self._single_log_visible = False
+        log_toggle_btn = ttk.Button(progress_frame, text="📋 日志 ▸",
+                                    command=self._toggle_single_log)
+        log_toggle_btn.pack(fill="x", pady=(5, 0))
+        log_frame = ttk.Frame(progress_frame)
+        # 不 pack，由 _toggle_single_log 控制显示
+        self._single_log_frame = log_frame
+        self._single_log_toggle_btn = log_toggle_btn
+        self.single_log_text = scrolledtext.ScrolledText(log_frame, height=5, wrap="word",
+                                                         font=("Consolas", 9))
+        self.single_log_text.pack(fill="x")
+
         # ---- 视频网格（可滚动） ----
         grid_container = ttk.Frame(self.tab_single)
         grid_container.pack(fill="both", expand=True, padx=10, pady=5)
@@ -642,7 +679,7 @@ class App:
 
         # ---- URL 输入（折叠式，可选） ----
         manual_frame = ttk.LabelFrame(self.tab_single, text="手动输入 URL（可选）", padding=5)
-        manual_frame.pack(fill="x", padx=10, pady=(5, 0))
+        manual_frame.pack(fill="x", padx=10, pady=(0, 5))
 
         row = ttk.Frame(manual_frame)
         row.pack(fill="x")
@@ -652,36 +689,15 @@ class App:
         ttk.Entry(row, textvariable=self.title_var, width=25).pack(side="left", padx=(0, 5))
         ttk.Button(row, text="下载", width=6, command=self._start_single_manual).pack(side="left")
 
-        # ---- 进度区 ----
-        progress_frame = ttk.LabelFrame(self.tab_single, text="下载进度", padding=8)
-        progress_frame.pack(fill="x", padx=10, pady=(5, 10))
-
-        self.single_overall_label = tk.Label(progress_frame, text="就绪",
-                                              font=("Arial", 9), anchor="w")
-        self.single_overall_label.pack(fill="x")
-
-        prog_row = ttk.Frame(progress_frame)
-        prog_row.pack(fill="x", pady=(3, 0))
-        ttk.Label(prog_row, text="切片:", width=5).pack(side="left")
-        self.single_progress = ttk.Progressbar(prog_row, mode="determinate")
-        self.single_progress.pack(side="left", fill="x", expand=True)
-        self.single_slice_label = tk.Label(prog_row, text="", font=("Consolas", 9), fg="#555", width=15)
-        self.single_slice_label.pack(side="left")
-
-        merge_row = ttk.Frame(progress_frame)
-        merge_row.pack(fill="x", pady=(3, 0))
-        ttk.Label(merge_row, text="合并:", width=5).pack(side="left")
-        self.single_merge_progress = ttk.Progressbar(merge_row, mode="determinate")
-        self.single_merge_progress.pack(side="left", fill="x", expand=True)
-        self.single_merge_label = tk.Label(merge_row, text="", font=("Consolas", 9), fg="#888", width=15)
-        self.single_merge_label.pack(side="left")
-
-        # 日志（折叠）
-        log_frame = ttk.Frame(progress_frame)
-        log_frame.pack(fill="x", pady=(5, 0))
-        self.single_log_text = scrolledtext.ScrolledText(log_frame, height=5, wrap="word",
-                                                         font=("Consolas", 9))
-        self.single_log_text.pack(fill="x")
+    def _toggle_single_log(self):
+        """展开/收起单视频日志"""
+        self._single_log_visible = not self._single_log_visible
+        if self._single_log_visible:
+            self._single_log_frame.pack(fill="x", pady=(5, 0))
+            self._single_log_toggle_btn.config(text="📋 日志 ▾")
+        else:
+            self._single_log_frame.pack_forget()
+            self._single_log_toggle_btn.config(text="📋 日志 ▸")
 
     def _load_single_page(self):
         """加载当前页的视频列表"""
@@ -819,7 +835,7 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
-        self._log_to_ui(f"准备下载 {len(selected)} 个视频")
+        self._log_to_single_ui(f"准备下载 {len(selected)} 个视频")
 
         def on_progress(current, total):
             pct = f"{current}/{total}" if total > 0 else "?"
@@ -852,13 +868,14 @@ class App:
                 url = video.get("url", "")
                 self.root.after(0, lambda t=title, n=i+1, tn=total:
                     self.single_overall_label.config(text=f"[{n}/{tn}] {t[:40]}"))
-                if self.crawler.download_single(url, video_id=vid):
-                    if vid and self.crawler._history.get(vid, {}).get("download_time"):
-                        success += 1
-                    else:
-                        skipped += 1
-                else:
-                    pass  # 下载失败已在 log 里记录
+                try:
+                    if self.crawler.download_single(url, video_id=vid):
+                        if vid and self.crawler._history.get(vid, {}).get("download_time"):
+                            success += 1
+                        else:
+                            skipped += 1
+                except Exception as e:
+                    self._log_to_single_ui(f"✗ 下载失败 [{title}]: {e}")
 
             self.root.after(0, lambda: self.single_overall_label.config(
                 text=f"完成 — 新下载: {success}，跳过: {skipped}"))
