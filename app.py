@@ -835,6 +835,10 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
+        # 强制清理旧线程引用
+        self.crawl_thread = None
+        self.crawler = None
+
         self._log_to_single_ui(f"准备下载 {len(selected)} 个视频")
 
         # 下载开始时自动展开日志
@@ -849,16 +853,20 @@ class App:
                 self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
 
-        self.crawler = CrawlerCore(
-            self.config,
-            log_callback=self._log_to_single_ui,
-            progress_callback=on_progress,
-            base_url=self.single_site_var.get(),
-            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
-                self.single_merge_progress.configure(value=p),
-                self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
-            ]),
-        )
+        try:
+            self.crawler = CrawlerCore(
+                self.config,
+                log_callback=self._log_to_single_ui,
+                progress_callback=on_progress,
+                base_url=self.single_site_var.get(),
+                merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                    self.single_merge_progress.configure(value=p),
+                    self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
+                ]),
+            )
+        except Exception as e:
+            self._log_to_single_ui(f"创建 CrawlerCore 失败: {e}")
+            return
 
         def run():
             self._log_to_single_ui(f"下载线程已启动")
