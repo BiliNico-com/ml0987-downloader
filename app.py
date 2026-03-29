@@ -837,6 +837,10 @@ class App:
 
         self._log_to_single_ui(f"准备下载 {len(selected)} 个视频")
 
+        # 下载开始时自动展开日志
+        if not self._single_log_visible:
+            self._toggle_single_log()
+
         def on_progress(current, total):
             pct = f"{current}/{total}" if total > 0 else "?"
             self.root.after(0, lambda: self.single_progress.configure(value=current * 100 // max(total, 1)))
@@ -857,25 +861,31 @@ class App:
         )
 
         def run():
+            self._log_to_single_ui(f"下载线程已启动")
             success = 0
             skipped = 0
             total = len(selected)
             for i, (var, video) in enumerate(selected):
                 if self.crawler._stop_flag:
+                    self._log_to_single_ui("已停止")
                     break
                 vid = video.get("id")
                 title = video.get("title", "")
                 url = video.get("url", "")
                 self.root.after(0, lambda t=title, n=i+1, tn=total:
                     self.single_overall_label.config(text=f"[{n}/{tn}] {t[:40]}"))
+                self._log_to_single_ui(f"开始处理: {title[:30]} (url={url[:60]})")
                 try:
-                    if self.crawler.download_single(url, video_id=vid):
+                    result = self.crawler.download_single(url, video_id=vid)
+                    self._log_to_single_ui(f"  download_single 返回: {result}")
+                    if result:
                         if vid and self.crawler._history.get(vid, {}).get("download_time"):
                             success += 1
                         else:
                             skipped += 1
                 except Exception as e:
-                    self._log_to_single_ui(f"✗ 下载失败 [{title}]: {e}")
+                    import traceback
+                    self._log_to_single_ui(f"✗ 下载失败 [{title}]: {e}\n{traceback.format_exc()}")
 
             self.root.after(0, lambda: self.single_overall_label.config(
                 text=f"完成 — 新下载: {success}，跳过: {skipped}"))
