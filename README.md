@@ -1,6 +1,6 @@
-# hsex 视频下载器
+# 视频下载器
 
-纯 Python + tkinter GUI，无需浏览器驱动，批量下载视频。AI写的。
+纯 Python + tkinter GUI，无需浏览器驱动，批量下载视频。AI写的，仅供学习交流，严禁用于商业用途。
 
 ## 功能
 
