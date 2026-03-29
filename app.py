@@ -945,9 +945,8 @@ class App:
 
                 def update_countdown():
                     if remaining["count"] > 0:
-                        countdown_label.config(text=f"【{remaining['count']} 秒后自动选择「{
-                            next(l for v, l in opts['choices'] if v == selected['value'])
-                        }」】")
+                        default_label = next(l for v, l in opts['choices'] if v == selected['value'])
+                        countdown_label.config(text=f"【{remaining['count']} 秒后自动选择「{default_label}」】")
                         remaining["count"] -= 1
                         timer_job["id"] = dialog.after(1000, update_countdown)
                     else:
