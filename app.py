@@ -28,7 +28,7 @@ try:
 except ImportError:
     HAS_PIL = False
 
-from crawler_core import CrawlerCore
+from crawler_core import CrawlerCore, MIRROR_SITES, LIST_TYPES, LIST_TYPE_ALIASES, DEFAULT_HEADERS
 
 # ==================== 配置 ====================
 
@@ -561,54 +561,348 @@ class App:
         self.crawl_thread.daemon = True
         self.crawl_thread.start()
 
-    # ==================== 单视频 Tab ====================
+    # ==================== 单视频 Tab（视频浏览） ====================
 
     def _build_tab_single(self):
-        """单视频 Tab"""
-        # URL 输入
-        url_frame = ttk.LabelFrame(self.tab_single, text="视频 URL", padding=10)
-        url_frame.pack(fill="x", padx=20, pady=(20, 5))
+        """单视频 Tab - 视频浏览、勾选、下载"""
+        # ---- 顶部控制栏 ----
+        top_frame = ttk.Frame(self.tab_single)
+        top_frame.pack(fill="x", padx=10, pady=(10, 5))
 
+        # 站点选择
+        ttk.Label(top_frame, text="站点:").pack(side="left")
+        self.single_site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        site_combo = ttk.Combobox(top_frame, textvariable=self.single_site_var,
+                                  values=list(MIRROR_SITES.values()), width=14, state="readonly")
+        site_combo.pack(side="left", padx=(2, 10))
+
+        # 列表类型
+        ttk.Label(top_frame, text="类型:").pack(side="left")
+        self.single_type_var = tk.StringVar(value="list")
+        type_combo = ttk.Combobox(top_frame, textvariable=self.single_type_var,
+                                  values=list(LIST_TYPE_ALIASES.keys()), width=8, state="readonly")
+        type_combo.pack(side="left", padx=(2, 10))
+
+        # 翻页控制
+        page_frame = ttk.Frame(top_frame)
+        page_frame.pack(side="left")
+
+        self.single_page_var = tk.IntVar(value=1)
+        ttk.Button(page_frame, text="◀", width=3, command=self._single_prev_page).pack(side="left")
+        ttk.Label(page_frame, text=" 第").pack(side="left")
+        self.single_page_entry = ttk.Spinbox(page_frame, from_=1, to=9999, width=4,
+                                              textvariable=self.single_page_var)
+        self.single_page_entry.pack(side="left", padx=2)
+        self.single_page_entry.bind("<Return>", lambda e: self._load_single_page())
+        ttk.Label(page_frame, text="页 ").pack(side="left")
+        ttk.Button(page_frame, text="▶", width=3, command=self._single_next_page).pack(side="left")
+
+        # 加载按钮
+        ttk.Button(top_frame, text="📋 加载", command=self._load_single_page).pack(side="left", padx=(10, 5))
+
+        # ---- 操作栏 ----
+        action_frame = ttk.Frame(self.tab_single)
+        action_frame.pack(fill="x", padx=10, pady=3)
+
+        self.single_status_label = ttk.Label(action_frame, text="点击「加载」获取视频列表")
+        self.single_status_label.pack(side="left", padx=5)
+
+        self.single_select_all_var = tk.BooleanVar()
+        ttk.Checkbutton(action_frame, text="全选", variable=self.single_select_all_var,
+                        command=self._single_toggle_all).pack(side="right", padx=5)
+
+        ttk.Button(action_frame, text="▶ 下载选中", command=self._start_single_batch).pack(side="right", padx=5)
+
+        # ---- 视频网格（可滚动） ----
+        grid_container = ttk.Frame(self.tab_single)
+        grid_container.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Canvas + 滚动条实现可滚动区域
+        self.single_canvas = tk.Canvas(grid_container, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(grid_container, orient="vertical", command=self.single_canvas.yview)
+        self.single_inner_frame = ttk.Frame(self.single_canvas)
+
+        self.single_inner_frame.bind("<Configure>",
+            lambda e: self.single_canvas.configure(scrollregion=self.single_canvas.bbox("all")))
+
+        self.single_canvas.create_window((0, 0), window=self.single_inner_frame, anchor="nw")
+        self.single_canvas.configure(yscrollcommand=scrollbar.set)
+
+        self.single_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # 鼠标滚轮绑定
+        self.single_canvas.bind_all("<MouseWheel>",
+            lambda e: self.single_canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        # 视频卡片数据
+        self._single_videos = []       # 当前页视频列表
+        self._single_check_vars = []   # [(BooleanVar, video_dict)]
+        self._single_thumb_refs = []   # 保持图片引用防止 GC
+
+        # ---- URL 输入（折叠式，可选） ----
+        manual_frame = ttk.LabelFrame(self.tab_single, text="手动输入 URL（可选）", padding=5)
+        manual_frame.pack(fill="x", padx=10, pady=(5, 0))
+
+        row = ttk.Frame(manual_frame)
+        row.pack(fill="x")
         self.url_var = tk.StringVar()
-        ttk.Entry(url_frame, textvariable=self.url_var, width=60).pack(fill="x", padx=5, pady=5)
-
-        # 标题输入
-        title_frame = ttk.LabelFrame(self.tab_single, text="视频标题（可选，留空自动获取）", padding=10)
-        title_frame.pack(fill="x", padx=20, pady=5)
-
+        ttk.Entry(row, textvariable=self.url_var).pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.title_var = tk.StringVar()
-        ttk.Entry(title_frame, textvariable=self.title_var, width=60).pack(fill="x", padx=5, pady=5)
+        ttk.Entry(row, textvariable=self.title_var, width=25).pack(side="left", padx=(0, 5))
+        ttk.Button(row, text="下载", width=6, command=self._start_single_manual).pack(side="left")
 
-        # 按钮
-        btn_frame = ttk.Frame(self.tab_single)
-        btn_frame.pack(fill="x", padx=20, pady=10)
-        ttk.Button(btn_frame, text="▶ 开始下载", command=self._start_single).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=5)
-
-        # 进度显示
-        progress_frame = ttk.LabelFrame(self.tab_single, text="下载进度", padding=10)
-        progress_frame.pack(fill="both", expand=True, padx=20, pady=(5, 20))
+        # ---- 进度区 ----
+        progress_frame = ttk.LabelFrame(self.tab_single, text="下载进度", padding=8)
+        progress_frame.pack(fill="x", padx=10, pady=(5, 10))
 
         self.single_overall_label = tk.Label(progress_frame, text="就绪",
                                               font=("Arial", 9), anchor="w")
         self.single_overall_label.pack(fill="x")
 
-        self.single_progress = ttk.Progressbar(progress_frame, mode="determinate")
-        self.single_progress.pack(fill="x", pady=(3, 5))
+        prog_row = ttk.Frame(progress_frame)
+        prog_row.pack(fill="x", pady=(3, 0))
+        ttk.Label(prog_row, text="切片:", width=5).pack(side="left")
+        self.single_progress = ttk.Progressbar(prog_row, mode="determinate")
+        self.single_progress.pack(side="left", fill="x", expand=True)
+        self.single_slice_label = tk.Label(prog_row, text="", font=("Consolas", 9), fg="#555", width=15)
+        self.single_slice_label.pack(side="left")
 
-        self.single_slice_label = tk.Label(progress_frame, text="",
-                                            font=("Consolas", 9), anchor="w", fg="#555")
-        self.single_slice_label.pack(fill="x")
+        merge_row = ttk.Frame(progress_frame)
+        merge_row.pack(fill="x", pady=(3, 0))
+        ttk.Label(merge_row, text="合并:", width=5).pack(side="left")
+        self.single_merge_progress = ttk.Progressbar(merge_row, mode="determinate")
+        self.single_merge_progress.pack(side="left", fill="x", expand=True)
+        self.single_merge_label = tk.Label(merge_row, text="", font=("Consolas", 9), fg="#888", width=15)
+        self.single_merge_label.pack(side="left")
 
-        # 合并进度
-        self.single_merge_label = tk.Label(progress_frame, text="",
-                                            font=("Consolas", 9), anchor="w", fg="#888")
-        self.single_merge_label.pack(fill="x")
-        self.single_merge_progress = ttk.Progressbar(progress_frame, mode="determinate")
-        self.single_merge_progress.pack(fill="x", pady=(3, 5))
+        # 日志（折叠）
+        log_frame = ttk.Frame(progress_frame)
+        log_frame.pack(fill="x", pady=(5, 0))
+        self.single_log_text = scrolledtext.ScrolledText(log_frame, height=5, wrap="word",
+                                                         font=("Consolas", 9))
+        self.single_log_text.pack(fill="x")
 
-        self.single_status_text = scrolledtext.ScrolledText(progress_frame, height=8, wrap="word")
-        self.single_status_text.pack(fill="both", expand=True, pady=(5, 0))
+    def _load_single_page(self):
+        """加载当前页的视频列表"""
+        page = self.single_page_var.get()
+        site = self.single_site_var.get()
+        type_name = self.single_type_var.get()
+        list_key = LIST_TYPE_ALIASES.get(type_name, type_name)
+        url_pattern = LIST_TYPES.get(list_key, "list-{page}.htm")
+
+        self.single_status_label.config(text=f"正在加载第 {page} 页...")
+        # 清空旧内容
+        for w in self.single_inner_frame.winfo_children():
+            w.destroy()
+        self._single_videos.clear()
+        self._single_check_vars.clear()
+        self._single_thumb_refs.clear()
+
+        def run():
+            try:
+                crawler = CrawlerCore(config={}, base_url=site)
+                list_url = f"{site}/{url_pattern.format(page=page)}"
+                videos = crawler._extract_video_urls(list_url)
+            except Exception as e:
+                self.root.after(0, lambda: self.single_status_label.config(text=f"加载失败: {e}"))
+                return
+
+            self.root.after(0, lambda: self._show_single_videos(videos))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_single_videos(self, videos):
+        """在网格中显示视频列表"""
+        self._single_videos = videos
+
+        if not videos:
+            self.single_status_label.config(text="当前页没有视频")
+            return
+
+        self.single_status_label.config(text=f"第 {self.single_page_var.get()} 页 — 共 {len(videos)} 个视频")
+
+        # 计算列数（根据窗口宽度自适应，默认 3 列）
+        cols = 3
+        for idx, video in enumerate(videos):
+            row_idx = idx // cols
+            col_idx = idx % cols
+
+            # 卡片 Frame
+            card = ttk.Frame(self.single_inner_frame, relief="groove", borderwidth=1)
+            card.grid(row=row_idx, column=col_idx, padx=5, pady=5, sticky="nsew")
+            self.single_inner_frame.columnconfigure(col_idx, weight=1)
+
+            # 勾选框
+            var = tk.BooleanVar(value=True)
+            self._single_check_vars.append((var, video))
+            cb = ttk.Checkbutton(card, variable=var)
+            cb.grid(row=0, column=0, sticky="ne", padx=2, pady=2)
+
+            # 封面图
+            cover_label = tk.Label(card, width=16, height=9, bg="#e0e0e0",
+                                   text="加载中...", font=("Arial", 8), fg="#999")
+            cover_label.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=2, pady=(0, 2))
+
+            # 标题
+            title_label = tk.Label(card, text=video.get("title", "")[:30],
+                                   font=("Arial", 8), wraplength=140, justify="left",
+                                   anchor="w")
+            title_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 4))
+
+            # 异步加载封面
+            cover_url = video.get("cover", "")
+            if cover_url:
+                threading.Thread(target=self._load_single_cover,
+                                 args=(cover_url, cover_label), daemon=True).start()
+
+        self.single_select_all_var.set(True)
+
+    def _load_single_cover(self, url, label):
+        """异步加载封面图"""
+        try:
+            import urllib.request
+            from io import BytesIO
+            req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_HEADERS["User-Agent"]})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = BytesIO(resp.read())
+            from PIL import Image, ImageTk
+            img = Image.open(data)
+            img.thumbnail((160, 90))
+            photo = ImageTk.PhotoImage(img)
+            self._single_thumb_refs.append(photo)  # 防止 GC
+            self.root.after(0, lambda: label.configure(image=photo, text="", bg="white"))
+        except Exception:
+            self.root.after(0, lambda: label.configure(text="封面\n加载失败", bg="#f0f0f0"))
+
+    def _single_toggle_all(self):
+        """全选/取消全选"""
+        select_all = self.single_select_all_var.get()
+        for var, _ in self._single_check_vars:
+            var.set(select_all)
+
+    def _single_prev_page(self):
+        page = self.single_page_var.get()
+        if page > 1:
+            self.single_page_var.set(page - 1)
+            self._load_single_page()
+
+    def _single_next_page(self):
+        self.single_page_var.set(self.single_page_var.get() + 1)
+        self._load_single_page()
+
+    def _start_single_batch(self):
+        """批量下载勾选的视频"""
+        selected = [(var, video) for var, video in self._single_check_vars if var.get()]
+        if not selected:
+            messagebox.showwarning("警告", "请至少勾选一个视频")
+            return
+
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        self._log_to_ui(f"准备下载 {len(selected)} 个视频")
+
+        def on_progress(current, total):
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self.root.after(0, lambda: self.single_progress.configure(value=current * 100 // max(total, 1)))
+            self.root.after(0, lambda: self.single_slice_label.config(text=pct))
+            if current <= 1:
+                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
+
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._log_to_single_ui,
+            progress_callback=on_progress,
+            base_url=self.single_site_var.get(),
+            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                self.single_merge_progress.configure(value=p),
+                self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
+            ]),
+        )
+
+        def run():
+            success = 0
+            skipped = 0
+            total = len(selected)
+            for i, (var, video) in enumerate(selected):
+                if self.crawler._stop_flag:
+                    break
+                vid = video.get("id")
+                title = video.get("title", "")
+                url = video.get("url", "")
+                self.root.after(0, lambda t=title, n=i+1, tn=total:
+                    self.single_overall_label.config(text=f"[{n}/{tn}] {t[:40]}"))
+                if self.crawler.download_single(url, video_id=vid):
+                    if vid and self.crawler._history.get(vid, {}).get("download_time"):
+                        success += 1
+                    else:
+                        skipped += 1
+                else:
+                    pass  # 下载失败已在 log 里记录
+
+            self.root.after(0, lambda: self.single_overall_label.config(
+                text=f"完成 — 新下载: {success}，跳过: {skipped}"))
+            self.root.after(0, lambda: self._log_to_single_ui(
+                f"── 下载完成（新下载: {success}，跳过: {skipped}） ──"))
+            # 刷新列表（更新已下载状态）
+
+        self.crawl_thread = threading.Thread(target=run, daemon=True)
+        self.crawl_thread.start()
+
+    def _start_single_manual(self):
+        """手动输入 URL 下载（保留原有功能）"""
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showwarning("警告", "请输入视频 URL")
+            return
+        if self.crawl_thread and self.crawl_thread.is_alive():
+            messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        title = self.title_var.get().strip() or None
+
+        def on_progress(current, total):
+            pct = f"{current}/{total}" if total > 0 else "?"
+            self.root.after(0, lambda: self.single_progress.configure(value=current * 100 // max(total, 1)))
+            self.root.after(0, lambda: self.single_slice_label.config(text=pct))
+            if current <= 1:
+                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
+
+        self.crawler = CrawlerCore(
+            self.config,
+            log_callback=self._log_to_single_ui,
+            progress_callback=on_progress,
+            base_url=self.single_site_var.get(),
+            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                self.single_merge_progress.configure(value=p),
+                self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
+            ]),
+        )
+
+        def run():
+            try:
+                self.root.after(0, lambda: self.single_overall_label.config(text="正在下载..."))
+                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.single_merge_label.config(text=""))
+                self.crawler.download_single(url, title)
+                self.root.after(0, lambda: self.single_overall_label.config(text="下载完成"))
+                self._log_to_single_ui("── 下载完成 ──")
+            except Exception as e:
+                self._log_to_single_ui(f"错误: {e}")
+
+        self.crawl_thread = threading.Thread(target=run, daemon=True)
+        self.crawl_thread.start()
+
+    def _log_to_single_ui(self, message):
+        """写入单视频 Tab 的日志框"""
+        def _append():
+            self.single_log_text.insert("end", message + "\n")
+            self.single_log_text.see("end")
+        self.root.after(0, _append)
 
     # ==================== 设置 Tab ====================
 
