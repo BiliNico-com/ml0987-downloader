@@ -254,6 +254,13 @@ class App:
                                            font=("Consolas", 9), anchor="w", fg="#555")
         self.crawl_slice_label.pack(fill="x")
 
+        # 合并进度
+        self.crawl_merge_label = tk.Label(right_frame, text="",
+                                           font=("Consolas", 9), anchor="w", fg="#888")
+        self.crawl_merge_label.pack(fill="x")
+        self.crawl_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
+        self.crawl_merge_progress.pack(fill="x", pady=(3, 5))
+
         # 日志文本框
         self.crawl_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
@@ -374,6 +381,13 @@ class App:
         self.search_slice_label = tk.Label(right_frame, text="",
                                            font=("Consolas", 9), anchor="w", fg="#555")
         self.search_slice_label.pack(fill="x")
+
+        # 合并进度
+        self.search_merge_label = tk.Label(right_frame, text="",
+                                           font=("Consolas", 9), anchor="w", fg="#888")
+        self.search_merge_label.pack(fill="x")
+        self.search_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
+        self.search_merge_progress.pack(fill="x", pady=(3, 5))
 
         self.search_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
@@ -502,6 +516,13 @@ class App:
                 f"切片: {pct}"
             )
 
+        def on_merge_progress(percent, speed):
+            self.root.after(0, lambda: self.search_merge_progress.configure(value=percent))
+            speed_text = f"，速度: {speed}" if speed else ""
+            self.root.after(0, lambda: self.search_merge_label.config(
+                text=f"合并 MP4: {percent}%{speed_text}"
+            ))
+
         self.crawler = CrawlerCore(
             self.config,
             log_callback=self._log_to_ui,
@@ -509,11 +530,14 @@ class App:
             info_callback=self._update_search_cover_preview,
             confirm_callback=self._confirm_dialog,
             base_url=self.search_site_var.get(),
+            merge_progress_callback=on_merge_progress,
         )
 
         def run():
             try:
                 self.root.after(0, lambda: self.search_overall_label.config(text="正在下载作者视频..."))
+                self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.search_merge_label.config(text=""))
                 result = self.crawler.crawl_authors(
                     authors=selected,
                     page_start=self.search_author_page_start_var.get(),
@@ -571,6 +595,13 @@ class App:
         self.single_slice_label = tk.Label(progress_frame, text="",
                                             font=("Consolas", 9), anchor="w", fg="#555")
         self.single_slice_label.pack(fill="x")
+
+        # 合并进度
+        self.single_merge_label = tk.Label(progress_frame, text="",
+                                            font=("Consolas", 9), anchor="w", fg="#888")
+        self.single_merge_label.pack(fill="x")
+        self.single_merge_progress = ttk.Progressbar(progress_frame, mode="determinate")
+        self.single_merge_progress.pack(fill="x", pady=(3, 5))
 
         self.single_status_text = scrolledtext.ScrolledText(progress_frame, height=8, wrap="word")
         self.single_status_text.pack(fill="both", expand=True, pady=(5, 0))
@@ -1070,11 +1101,17 @@ class App:
             progress_callback=on_progress,
             info_callback=self._update_search_cover_preview,
             base_url=self.search_site_var.get(),
+            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                self.search_merge_progress.configure(value=p),
+                self.search_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
+            ]),
         )
 
         def run():
             try:
                 self.root.after(0, lambda: self.search_overall_label.config(text="正在搜索下载..."))
+                self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.search_merge_label.config(text=""))
                 result = self.crawler.crawl_search(
                     keyword=keyword,
                     page_start=self.search_page_start_var.get(),
@@ -1118,11 +1155,17 @@ class App:
             progress_callback=on_progress,
             info_callback=self._update_cover_preview,
             base_url=self.site_var.get(),
+            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                self.crawl_merge_progress.configure(value=p),
+                self.crawl_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
+            ]),
         )
 
         def run():
             try:
                 self.root.after(0, lambda: self.crawl_overall_label.config(text="正在爬取..."))
+                self.root.after(0, lambda: self.crawl_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.crawl_merge_label.config(text=""))
                 result = self.crawler.crawl_batch(
                     page_start=self.page_start_var.get(),
                     page_end=self.page_end_var.get(),
@@ -1170,11 +1213,17 @@ class App:
             log_callback=self._log_to_ui,
             progress_callback=on_progress,
             base_url=self.site_var.get(),
+            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
+                self.single_merge_progress.configure(value=p),
+                self.single_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
+            ]),
         )
 
         def run():
             try:
                 self.root.after(0, lambda: self.single_overall_label.config(text="正在下载..."))
+                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.single_merge_label.config(text=""))
                 self.crawler.download_single(url, title)
                 self.root.after(0, lambda: self.single_overall_label.config(text="下载完成"))
                 self._status_to_ui(self.single_status_text, "── 下载完成 ──")

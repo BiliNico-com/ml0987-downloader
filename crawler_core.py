@@ -270,7 +270,8 @@ class TSDownloader:
 
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path,
                  headers: dict = None, threads: int = None, key_url: str = None,
-                 progress_callback=None, stop_check=None, session: requests.Session = None):
+                 progress_callback=None, stop_check=None, session: requests.Session = None,
+                 merge_progress_callback=None):
         self.segments = segments
         self.output_file = output_file
         self.headers = headers or DEFAULT_HEADERS
@@ -278,6 +279,7 @@ class TSDownloader:
         self.threads = threads or min(32, (os.cpu_count() or 1) + 4)
         self.key_url = key_url
         self.progress_callback = progress_callback
+        self.merge_progress_callback = merge_progress_callback  # 合并进度回调 (percent, speed)
         self.stop_check = stop_check  # 可调用对象，返回 True 时停止
         self._key_cache: Optional[bytes] = None
         self._stopped = False
@@ -422,7 +424,7 @@ class TSDownloader:
         return data
 
     def _convert_to_mp4(self, ts_file: Path) -> bool:
-        """用 ffmpeg 转换为 MP4"""
+        """用 ffmpeg 转换为 MP4（异步读取进度）"""
         import sys as _sys
 
         if getattr(_sys, 'frozen', False):
@@ -436,7 +438,8 @@ class TSDownloader:
         try:
             subprocess.run(
                 [str(ffmpeg_bin), "-version"],
-                capture_output=True, check=True, timeout=10
+                capture_output=True, check=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
         except Exception:
             logger.error(f"ffmpeg 未找到: {ffmpeg_bin}")
@@ -447,18 +450,63 @@ class TSDownloader:
             "-i", str(ts_file),
             "-c", "copy",
             "-bsf:a", "aac_adtstoasc",
+            "-progress", "pipe:1",
+            "-nostats",
             str(self.output_file)
         ]
 
         logger.info(f"执行: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
-        if result.returncode == 0:
+        # 获取 ts 文件大小用于估算进度
+        ts_size = ts_file.stat().st_size if ts_file.exists() else 0
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+
+        # 后台线程读取进度
+        progress_info = {"percent": 0, "speed": ""}
+
+        def _read_progress():
+            try:
+                for line in proc.stdout:
+                    line = line.decode("utf-8", errors="replace").strip()
+                    if line.startswith("out_time_us="):
+                        # ffmpeg 输出的微秒数
+                        try:
+                            us = int(line.split("=")[1])
+                            sec = us / 1_000_000
+                            # 用文件大小粗估进度（copy 模式下 size 基本就是进度）
+                            if ts_size > 0 and self.merge_progress_callback:
+                                progress_info["percent"] = min(99, int(sec * 100 / max(ts_size / 500000, 1)))
+                                self.merge_progress_callback(progress_info["percent"], "")
+                        except (ValueError, ZeroDivisionError):
+                            pass
+                    elif line.startswith("speed="):
+                        progress_info["speed"] = line.split("=")[1].strip()
+                        if self.merge_progress_callback and progress_info["percent"] > 0:
+                            self.merge_progress_callback(progress_info["percent"], progress_info["speed"])
+            except Exception:
+                pass
+
+        import threading
+        t = threading.Thread(target=_read_progress, daemon=True)
+        t.start()
+
+        proc.wait(timeout=300)
+
+        if proc.returncode == 0:
+            if self.merge_progress_callback:
+                self.merge_progress_callback(100, "")
             logger.info(f"转换成功: {self.output_file}")
             ts_file.unlink(missing_ok=True)
             return True
         else:
-            logger.error(f"转换失败: {result.stderr[:500]}")
+            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+            logger.error(f"转换失败: {stderr_output}")
             return False
 
 
@@ -470,10 +518,12 @@ class CrawlerCore:
     HISTORY_FILE = "download_history.json"
 
     def __init__(self, config: dict, log_callback=None, progress_callback=None,
-                 info_callback=None, confirm_callback=None, base_url: str = None):
+                 info_callback=None, confirm_callback=None, base_url: str = None,
+                 merge_progress_callback=None):
         self.config = config
         self.log_callback = log_callback
         self.progress_callback = progress_callback
+        self.merge_progress_callback = merge_progress_callback
         self.info_callback = info_callback
         self.confirm_callback = confirm_callback  # 确认弹窗回调
         self._stop_flag = False
@@ -693,6 +743,7 @@ class CrawlerCore:
             progress_callback=lambda c, t: self._progress(c, t),
             stop_check=lambda: self._stop_flag,
             session=self.session,
+            merge_progress_callback=self.merge_progress_callback,
         )
 
         success, failed_segs = downloader.download()
