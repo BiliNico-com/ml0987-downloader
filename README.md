@@ -1,20 +1,25 @@
 # hsex 视频下载器
 
-纯 Python + tkinter GUI，无需浏览器驱动，批量下载视频。AI写的！
+纯 Python + tkinter GUI，无需浏览器驱动，批量下载 ml0987 视频。
 
 ## 功能
 
 - **批量爬取** — 支持视频、周榜、月榜、5分钟+、10分钟+ 列表，自定义页码范围
+- **搜索下载** — 输入关键词搜索，支持最新/最热排序，搜索结果直接批量下载
+- **搜索作者** — 按关键词搜索作者，勾选后批量下载作者全部视频
+- **作者页数显示** — 搜索作者后自动检测总页数，方便设置下载范围
+- **作者归档目录** — 下载作者视频时自动按作者创建子目录，方便分类管理
 - **单视频下载** — 输入 URL 直接下载
+- **标题含作者** — 可选在文件名中附加上传者名称
 - **封面预览** — 批量爬取时实时显示当前视频封面和标题
 - **切片进度** — 实时显示当前视频的 TS 切片下载进度
-- **按上传日期分类** — 自动识别视频上传日期，按日期归类存储
+- **按上传日期分类** — 自动识别视频上传日期，按日期归类存储（可关闭）
 - **防重复下载** — 已下载视频自动跳过，跨次运行共享下载记录
+- **多域名** — 支持 ml0987.xyz / hsex.icu / hsex.men / hsex.tv 切换
 - **SOCKS5 代理** — 内置 SOCKS5 代理支持，无需额外安装 PySocks，可测试代理连接
 - **并发下载** — 多线程并发下载 TS 切片，速度快
 - **AES 解密** — 自动处理加密的 m3u8 流
-- **搜索功能** — 增加了搜索功能
-
+- **随时停止** — 下载过程中可随时停止，不卡顿
 
 ## 快速开始
 
@@ -40,20 +45,22 @@ python app.py
 
 > `pycryptodome` 和 `Pillow` 缺失时程序仍可运行，仅对应功能不可用。
 
-> ffmpeg.exe 不在 pip 里，需要手动下载放到程序同目录。推荐从 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 下载 essentials 版。
+> ffmpeg.exe 不在 pip 里，需要手动下载放到程序同目录。推荐从 [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) 下载 essentials 版。exe 打包版已内置。
 
 ## 输出结构
 
-按视频上传日期自动分类：
+按视频上传日期自动分类，作者下载时自动归档到作者子目录：
 
 ```
 downloads/
 ├── 2026-03-28/
 │   └── 视频标题A.mp4
 ├── 2026-03-29/
-│   ├── 视频标题B.mp4
-│   └── 视频标题C.mp4
-└── ...
+│   ├── EX，益生菌/              ← 作者下载自动创建子目录
+│   │   ├── 视频标题B.mp4
+│   │   └── 视频标题C.mp4
+│   └── 视频标题D.mp4
+└── download_history.json        ← 已下载记录（防重复）
 ```
 
 ## 文件说明
@@ -74,7 +81,8 @@ downloads/
 
 ```bash
 pip install -r requirements.txt
-pyinstaller --noconfirm --onedir --windowed --name "ml0987下载器" ^
+pyinstaller --noconfirm --onedir --windowed --contents-directory Core ^
+    --name "ml0987下载器" ^
     --add-data "crawler_core.py;." ^
     --add-data "socks.py;." ^
     --hidden-import PIL --hidden-import PIL.ImageTk --hidden-import PIL.WebPImagePlugin ^
