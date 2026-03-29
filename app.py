@@ -949,10 +949,12 @@ class App:
         self.crawl_thread = threading.Thread(target=run, daemon=True)
         self.crawl_thread.start()
 
-    def _log_to_single_ui(self, message):
+    def _log_to_single_ui(self, message, level="info"):
         """写入单视频 Tab 的日志框"""
         def _append():
-            self.single_log_text.insert("end", message + "\n")
+            timestamp = time.strftime("%H:%M:%S")
+            prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
+            self.single_log_text.insert("end", f"[{timestamp}] {prefix} {message}\n")
             self.single_log_text.see("end")
         self.root.after(0, _append)
 
