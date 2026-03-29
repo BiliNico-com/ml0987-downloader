@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import logging
-import logging.handlers
 import threading
 import time
 import io
@@ -34,7 +33,6 @@ from crawler_core import CrawlerCore, MIRROR_SITES, LIST_TYPES, LIST_TYPE_ALIASE
 
 APP_DIR = Path(__file__).parent
 CONFIG_FILE = APP_DIR / "config.json"
-LOG_FILE = APP_DIR / "app.log"
 
 DEFAULT_CONFIG = {
     "output_dir": str(APP_DIR / "downloads"),
@@ -58,12 +56,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.handlers.RotatingFileHandler(
-            LOG_FILE,
-            maxBytes=10*1024*1024,
-            backupCount=3,
-            encoding="utf-8"
-        ),
         logging.StreamHandler()
     ]
 )
@@ -119,6 +111,26 @@ def save_config(cfg: dict):
         logger.error(f"保存配置失败: {e}")
 
 
+# ==================== 日志 Handler ====================
+
+class _UITextHandler(logging.Handler):
+    """将 Python logging 输出到 tkinter ScrolledText"""
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+
+    def emit(self, record):
+        msg = self.format(record)
+        try:
+            self.text_widget.after(0, lambda: self._append(msg))
+        except Exception:
+            pass
+
+    def _append(self, msg):
+        self.text_widget.insert("end", msg + "\n")
+        self.text_widget.see("end")
+
+
 # ==================== GUI 主界面 ====================
 
 class App:
@@ -167,7 +179,7 @@ class App:
         self.notebook.add(self.tab_search, text="  搜索  ")
         self.notebook.add(self.tab_single, text="  单视频  ")
         self.notebook.add(self.tab_settings, text="  设置  ")
-        self.notebook.add(self.tab_log, text="  日志  ")
+        self.notebook.add(self.tab_log, text="  运行日志  ")
         # 环境检测 Tab 不显示标签，通过 select() 跳转
         self.notebook.add(self.tab_env, text="  环境检测  ")
 
@@ -261,10 +273,19 @@ class App:
         self.crawl_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
         self.crawl_merge_progress.pack(fill="x", pady=(3, 5))
 
-        # 日志文本框
-        self.crawl_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
+        # 日志折叠按钮 + 日志框
+        self._crawl_log_visible = False
+        crawl_log_btn_frame = ttk.Frame(right_frame)
+        crawl_log_btn_frame.pack(fill="x", pady=(5, 0))
+        self._crawl_log_toggle_btn = ttk.Button(crawl_log_btn_frame, text="📋 日志 ▸",
+                                                  command=self._toggle_crawl_log)
+        self._crawl_log_toggle_btn.pack(side="left")
+        ttk.Button(crawl_log_btn_frame, text="📁 导出", width=6,
+                   command=lambda: self._export_tab_log("批量爬取")).pack(side="right")
+        self._crawl_log_frame = ttk.Frame(right_frame)
+        self.crawl_status_text = scrolledtext.ScrolledText(self._crawl_log_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
-        self.crawl_status_text.pack(fill="both", expand=True, pady=(5, 0))
+        self.crawl_status_text.pack(fill="both", expand=True)
 
     # ==================== 搜索 Tab ====================
 
@@ -389,9 +410,19 @@ class App:
         self.search_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
         self.search_merge_progress.pack(fill="x", pady=(3, 5))
 
-        self.search_status_text = scrolledtext.ScrolledText(right_frame, height=8, wrap="word",
+        # 日志折叠按钮 + 日志框
+        self._search_log_visible = False
+        search_log_btn_frame = ttk.Frame(right_frame)
+        search_log_btn_frame.pack(fill="x", pady=(5, 0))
+        self._search_log_toggle_btn = ttk.Button(search_log_btn_frame, text="📋 日志 ▸",
+                                                   command=self._toggle_search_log)
+        self._search_log_toggle_btn.pack(side="left")
+        ttk.Button(search_log_btn_frame, text="📁 导出", width=6,
+                   command=lambda: self._export_tab_log("搜索")).pack(side="right")
+        self._search_log_frame = ttk.Frame(right_frame)
+        self.search_status_text = scrolledtext.ScrolledText(self._search_log_frame, height=8, wrap="word",
                                                             font=("Consolas", 9))
-        self.search_status_text.pack(fill="both", expand=True, pady=(5, 0))
+        self.search_status_text.pack(fill="both", expand=True)
 
         # 绑定搜索类型切换
         self.search_type_var.trace_add("write", lambda *_: self._toggle_search_mode())
@@ -435,7 +466,7 @@ class App:
             try:
                 crawler = CrawlerCore(
                     self.config,
-                    log_callback=self._log_to_ui,
+                    log_callback=self._log_to_search_ui,
                     base_url=self.search_site_var.get(),
                 )
                 authors = crawler.search_authors(keyword)
@@ -506,7 +537,11 @@ class App:
             return
 
         names = ", ".join(a["name"] for a in selected)
-        self._log_to_ui(f"准备爬取作者: {names}")
+        self._log_to_search_ui(f"准备爬取作者: {names}")
+
+        # 自动展开日志
+        if not self._search_log_visible:
+            self._toggle_search_log()
 
         def on_progress(current, total):
             pct = f"{current}/{total}" if total > 0 else "?"
@@ -529,7 +564,7 @@ class App:
 
         self.crawler = CrawlerCore(
             self.config,
-            log_callback=self._log_to_ui,
+            log_callback=self._log_to_search_ui,
             progress_callback=on_progress,
             info_callback=self._update_search_cover_preview,
             confirm_callback=self._confirm_dialog,
@@ -639,9 +674,13 @@ class App:
 
         # 日志（折叠在进度区下方，默认收起）
         self._single_log_visible = False
-        log_toggle_btn = ttk.Button(progress_frame, text="📋 日志 ▸",
+        single_log_btn_frame = ttk.Frame(progress_frame)
+        single_log_btn_frame.pack(fill="x", pady=(5, 0))
+        log_toggle_btn = ttk.Button(single_log_btn_frame, text="📋 日志 ▸",
                                     command=self._toggle_single_log)
-        log_toggle_btn.pack(fill="x", pady=(5, 0))
+        log_toggle_btn.pack(side="left")
+        ttk.Button(single_log_btn_frame, text="📁 导出", width=6,
+                   command=lambda: self._export_tab_log("单视频")).pack(side="right")
         log_frame = ttk.Frame(progress_frame)
         # 不 pack，由 _toggle_single_log 控制显示
         self._single_log_frame = log_frame
@@ -698,6 +737,26 @@ class App:
         else:
             self._single_log_frame.pack_forget()
             self._single_log_toggle_btn.config(text="📋 日志 ▸")
+
+    def _toggle_crawl_log(self):
+        """展开/收起批量爬取日志"""
+        self._crawl_log_visible = not self._crawl_log_visible
+        if self._crawl_log_visible:
+            self._crawl_log_frame.pack(fill="both", expand=True, pady=(5, 0))
+            self._crawl_log_toggle_btn.config(text="📋 日志 ▾")
+        else:
+            self._crawl_log_frame.pack_forget()
+            self._crawl_log_toggle_btn.config(text="📋 日志 ▸")
+
+    def _toggle_search_log(self):
+        """展开/收起搜索日志"""
+        self._search_log_visible = not self._search_log_visible
+        if self._search_log_visible:
+            self._search_log_frame.pack(fill="both", expand=True, pady=(5, 0))
+            self._search_log_toggle_btn.config(text="📋 日志 ▾")
+        else:
+            self._search_log_frame.pack_forget()
+            self._search_log_toggle_btn.config(text="📋 日志 ▸")
 
     def _load_single_page(self):
         """加载当前页的视频列表"""
@@ -949,6 +1008,30 @@ class App:
         self.crawl_thread = threading.Thread(target=run, daemon=True)
         self.crawl_thread.start()
 
+    def _log_to_crawl_ui(self, message, level="info"):
+        """写入批量爬取 Tab 的日志框"""
+        def _append():
+            timestamp = time.strftime("%H:%M:%S")
+            prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
+            self.crawl_status_text.insert("end", f"[{timestamp}] {prefix} {message}\n")
+            self.crawl_status_text.see("end")
+        try:
+            self.root.after(0, _append)
+        except Exception:
+            pass
+
+    def _log_to_search_ui(self, message, level="info"):
+        """写入搜索 Tab 的日志框"""
+        def _append():
+            timestamp = time.strftime("%H:%M:%S")
+            prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
+            self.search_status_text.insert("end", f"[{timestamp}] {prefix} {message}\n")
+            self.search_status_text.see("end")
+        try:
+            self.root.after(0, _append)
+        except Exception:
+            pass
+
     def _log_to_single_ui(self, message, level="info"):
         """写入单视频 Tab 的日志框"""
         def _append():
@@ -956,7 +1039,10 @@ class App:
             prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
             self.single_log_text.insert("end", f"[{timestamp}] {prefix} {message}\n")
             self.single_log_text.see("end")
-        self.root.after(0, _append)
+        try:
+            self.root.after(0, _append)
+        except Exception:
+            pass
 
     # ==================== 设置 Tab ====================
 
@@ -1022,20 +1108,31 @@ class App:
         ttk.Button(btn_frame, text="保存设置", command=self._save_settings).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="检查环境", command=self._manual_env_check).pack(side="left", padx=5)
 
-    # ==================== 日志 Tab ====================
+    # ==================== 运行日志 Tab ====================
 
     def _build_tab_log(self):
-        """日志 Tab"""
+        """运行日志 Tab — 程序级日志，关闭即清空"""
         log_frame = ttk.Frame(self.tab_log)
         log_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
+        # 说明文字
+        ttk.Label(log_frame, text="程序运行日志（关闭程序后自动清空）",
+                  font=("Arial", 9), foreground="#888").pack(anchor="w")
+
         self.log_text = scrolledtext.ScrolledText(log_frame, height=20, wrap="word",
                                                    font=("Consolas", 9))
-        self.log_text.pack(fill="both", expand=True)
+        self.log_text.pack(fill="both", expand=True, pady=(5, 0))
 
+        # 按钮行
         btn_frame = ttk.Frame(self.tab_log)
-        btn_frame.pack(fill="x", padx=20, pady=(0, 10))
+        btn_frame.pack(fill="x", padx=20, pady=(10, 10))
         ttk.Button(btn_frame, text="清空日志", command=self._clear_log).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="📁 导出日志...", command=self._export_log).pack(side="left", padx=5)
+
+        # 重定向 Python logging 到此日志框
+        self._log_handler = _UITextHandler(self.log_text)
+        self._log_handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(self._log_handler)
 
     # ==================== 环境检测 Tab ====================
 
@@ -1244,18 +1341,55 @@ class App:
     def _clear_log(self):
         self.log_text.delete(1.0, tk.END)
 
+    def _export_log(self):
+        """导出运行日志到文件"""
+        filepath = filedialog.asksaveasfilename(
+            title="导出日志",
+            defaultextension=".log",
+            filetypes=[("日志文件", "*.log"), ("文本文件", "*.txt"), ("所有文件", "*.*")],
+            initialfile=f"app_log_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        if filepath:
+            try:
+                content = self.log_text.get("1.0", tk.END)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                messagebox.showinfo("导出成功", f"日志已保存到:\n{filepath}")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e))
+
+    def _export_tab_log(self, tab_name: str):
+        """导出指定 Tab 的日志到文件"""
+        text_widget_map = {
+            "批量爬取": self.crawl_status_text,
+            "搜索": self.search_status_text,
+            "单视频": self.single_log_text,
+        }
+        text_widget = text_widget_map.get(tab_name)
+        if not text_widget:
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            title=f"导出{tab_name}日志",
+            defaultextension=".log",
+            filetypes=[("日志文件", "*.log"), ("文本文件", "*.txt"), ("所有文件", "*.*")],
+            initialfile=f"{tab_name}_log_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        )
+        if filepath:
+            try:
+                content = text_widget.get("1.0", tk.END)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                messagebox.showinfo("导出成功", f"{tab_name}日志已保存到:\n{filepath}")
+            except Exception as e:
+                messagebox.showerror("导出失败", str(e))
+
     # ==================== 日志/状态 UI 输出 ====================
 
     def _log_to_ui(self, text, level="info"):
-        """记录日志到 UI（线程安全）"""
-        timestamp = time.strftime("%H:%M:%S")
-        prefix = {"error": "✗", "warn": "⚠", "info": "ℹ"}.get(level, "·")
-        line = f"[{timestamp}] {prefix} {text}\n"
-        try:
-            self.root.after(0, lambda: self._append_log(line))
-        except Exception:
-            pass
-        logger.info(text)
+        """记录日志到运行日志 Tab（通过 Python logging）"""
+        log_level = {"error": logging.ERROR, "warn": logging.WARNING, "info": logging.INFO}.get(level, logging.INFO)
+        logger.log(log_level, text)
 
     def _append_log(self, line):
         self.log_text.insert(tk.END, line)
@@ -1435,6 +1569,10 @@ class App:
             messagebox.showwarning("警告", "请输入搜索关键词")
             return
 
+        # 自动展开日志
+        if not self._search_log_visible:
+            self._toggle_search_log()
+
         # 排序映射
         sort_map = {"最新": "new", "最热": "hot"}
         sort = sort_map.get(self.search_sort_var.get(), "new")
@@ -1453,7 +1591,7 @@ class App:
 
         self.crawler = CrawlerCore(
             self.config,
-            log_callback=self._log_to_ui,
+            log_callback=self._log_to_search_ui,
             progress_callback=on_progress,
             info_callback=self._update_search_cover_preview,
             base_url=self.search_site_var.get(),
@@ -1496,6 +1634,11 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
+        # 自动展开日志
+        if not self._crawl_log_visible:
+            self._toggle_crawl_log()
+
+
         def on_progress(current, total):
             """当前视频的切片进度"""
             pct = f"{current}/{total}" if total > 0 else "?"
@@ -1511,7 +1654,7 @@ class App:
 
         self.crawler = CrawlerCore(
             self.config,
-            log_callback=self._log_to_ui,
+            log_callback=self._log_to_crawl_ui,
             progress_callback=on_progress,
             info_callback=self._update_cover_preview,
             base_url=self.site_var.get(),
@@ -1545,60 +1688,6 @@ class App:
         self.crawl_thread.daemon = True
         self.crawl_thread.start()
 
-    # ==================== 单视频下载 ====================
-
-    def _start_single(self):
-        """开始单个下载"""
-        if self.crawl_thread and self.crawl_thread.is_alive():
-            messagebox.showwarning("警告", "正在运行中，请先停止")
-            return
-
-        url = self.url_var.get().strip()
-        if not url:
-            messagebox.showwarning("警告", "请输入视频 URL")
-            return
-
-        title = self.title_var.get().strip() or None
-
-        def on_progress(current, total):
-            pct = f"{current}/{total}" if total > 0 else "?"
-            self._update_progress(
-                self.single_progress, current, total,
-                self.single_slice_label,
-                f"切片: {pct}"
-            )
-            # 切片开始下载时，重置合并进度条
-            if current <= 1:
-                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
-                self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
-
-        self.crawler = CrawlerCore(
-            self.config,
-            log_callback=self._log_to_ui,
-            progress_callback=on_progress,
-            base_url=self.site_var.get(),
-            merge_progress_callback=lambda p, s: self.root.after(0, lambda: [
-                self.single_merge_progress.configure(value=p),
-                self.single_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
-            ]),
-        )
-
-        def run():
-            try:
-                self.root.after(0, lambda: self.single_overall_label.config(text="正在下载..."))
-                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
-                self.root.after(0, lambda: self.single_merge_label.config(text=""))
-                self.crawler.download_single(url, title)
-                self.root.after(0, lambda: self.single_overall_label.config(text="下载完成"))
-                self._status_to_ui(self.single_status_text, "── 下载完成 ──")
-            except Exception as e:
-                self._status_to_ui(self.single_status_text, f"错误: {e}")
-                logger.exception("单个下载失败")
-
-        self.crawl_thread = threading.Thread(target=run)
-        self.crawl_thread.daemon = True
-        self.crawl_thread.start()
-
     # ==================== 停止 ====================
 
     def _stop_crawl(self):
@@ -1609,7 +1698,7 @@ class App:
             self.crawl_thread = None
             self.crawler = None
             self._status_to_ui(self.crawl_status_text, "── 已停止 ──")
-            self._status_to_ui(self.single_status_text, "── 已停止 ──")
+            self._status_to_ui(self.single_log_text, "── 已停止 ──")
             self._status_to_ui(self.search_status_text, "── 已停止 ──")
             try:
                 self.root.after(0, lambda: self.crawl_overall_label.config(text="已停止"))
