@@ -872,8 +872,34 @@ class CrawlerCore:
 
         return authors
 
+    def get_author_page_count(self, author_url: str) -> int:
+        """获取作者视频的总页数（从分页导航中提取最大数字页码）"""
+        try:
+            resp = http_get(author_url, timeout=15)
+            if not resp or resp.status_code != 200:
+                return 1
+            # 匹配分页链接: <a href="user-{数字}.htm?author=xxx">数字</a>
+            # 提取所有纯数字页码（排除 ▶ 等非数字内容）
+            page_nums = []
+            for m in re.finditer(
+                r'<a[^>]*href="user-(\d+)\.htm\?author=[^"]*"[^>]*>\s*(\d+)\s*</a>',
+                resp.text
+            ):
+                page_num = int(m.group(1))
+                link_text = m.group(2).strip()
+                # 确保链接文本也是数字（排除 ▶ 等）
+                if link_text.isdigit():
+                    page_nums.append(page_num)
+            return max(page_nums) if page_nums else 1
+        except Exception as e:
+            self._log(f"获取作者页数失败: {e}", "warn")
+            return 1
+
     def crawl_authors(self, authors: List[dict], page_start: int = 1, page_end: int = 1) -> dict:
-        """爬取指定作者的视频列表并下载，返回 {success: int, skipped: int}"""
+        """爬取指定作者的视频列表并下载，返回 {success: int, skipped: int}
+        
+        下载的视频会放到 downloads/{日期}/{作者ID}/ 目录下方便归档
+        """
         total_success = 0
         total_skipped = 0
 
@@ -882,8 +908,12 @@ class CrawlerCore:
                 break
 
             author_name = author_info.get("name", "未知作者")
+            author_param = author_info.get("param", author_name)
             author_url = author_info.get("url", "")
             self._log(f"===== 开始爬取作者: {author_name} =====")
+
+            # 作者子目录名：使用作者 param（ID），清理非法字符
+            author_dir_name = sanitize_filename(author_param)
 
             for page in range(page_start, page_end + 1):
                 if self._stop_flag:
@@ -891,14 +921,14 @@ class CrawlerCore:
 
                 self._log(f"  第 {page} 页...")
 
+                # 作者分页 URL 格式: user-{page}.htm?author=xxx
                 if page == 1:
                     list_url = author_url
                 else:
-                    from urllib.parse import urlencode, urlparse, parse_qs
+                    from urllib.parse import urlparse, parse_qs, urlencode
                     parsed = urlparse(author_url)
                     params = parse_qs(parsed.query)
-                    params["page"] = [str(page)]
-                    list_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{urlencode(params, doseq=True)}"
+                    list_url = f"{self.base_url}/user-{page}.htm?{urlencode(params, doseq=True)}"
 
                 video_list = self._extract_video_urls(list_url)
                 if not video_list:
@@ -929,7 +959,15 @@ class CrawlerCore:
                         except Exception:
                             pass
 
-                    if self.download_single(url, title, video_id=vid):
+                    # 构造作者专属输出目录: downloads/{日期}/{作者ID}/
+                    output_root = Path(self.config.get("output_dir", "downloads"))
+                    if self.config.get("sort_by_upload_date", True):
+                        date_str = datetime.now().strftime("%Y-%m-%d")
+                    else:
+                        date_str = datetime.now().strftime("%Y-%m-%d")
+                    author_output_dir = output_root / date_str / author_dir_name
+
+                    if self.download_single(url, title, video_id=vid, output_dir=author_output_dir):
                         if vid and self._history.get(vid, {}).get("download_time"):
                             total_success += 1
                         else:

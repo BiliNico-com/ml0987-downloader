@@ -404,7 +404,7 @@ class App:
             self._start_search()
 
     def _search_authors(self):
-        """搜索作者，在列表中展示结果"""
+        """搜索作者，在列表中展示结果（含每个作者的总页数）"""
         keyword = self.search_keyword_var.get().strip()
         if not keyword:
             messagebox.showwarning("警告", "请输入搜索关键词")
@@ -425,6 +425,18 @@ class App:
                     base_url=self.search_site_var.get(),
                 )
                 authors = crawler.search_authors(keyword)
+
+                # 为每个作者获取总页数
+                if authors:
+                    self.root.after(0, lambda: self.search_overall_label.config(
+                        text=f"找到 {len(authors)} 个作者，正在获取页数信息..."
+                    ))
+                    for author in authors:
+                        try:
+                            page_count = crawler.get_author_page_count(author["url"])
+                            author["page_count"] = page_count
+                        except Exception:
+                            author["page_count"] = 1
             except Exception as e:
                 self.root.after(0, lambda: self.search_overall_label.config(text=f"搜索失败: {e}"))
                 return
@@ -434,14 +446,22 @@ class App:
                     self.search_overall_label.config(text=f"未找到匹配的作者: {keyword}")
                     return
 
-                self.search_overall_label.config(text=f"找到 {len(authors)} 个作者")
+                # 找出最大页数，用于设置 Spinbox 的上限
+                max_pages = max(a.get("page_count", 1) for a in authors)
+                self.search_author_page_start_var.set(1)
+                self.search_author_page_end_var.set(max_pages)
+
+                self.search_overall_label.config(
+                    text=f"找到 {len(authors)} 个作者（最多 {max_pages} 页）"
+                )
 
                 for author in authors:
                     var = tk.BooleanVar(value=True)
                     self._author_check_vars.append((var, author))
+                    page_info = f"{author['count']} 个视频，{author.get('page_count', '?')} 页"
                     cb = ttk.Checkbutton(
                         self._author_inner_frame,
-                        text=f"{author['name']}  （{author['count']} 个视频）",
+                        text=f"{author['name']}  （{page_info}）",
                         variable=var
                     )
                     cb.pack(anchor="w", pady=1)
