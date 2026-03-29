@@ -203,9 +203,9 @@ class App:
         type_frame = ttk.Frame(control_frame)
         type_frame.pack(fill="x", pady=3)
         ttk.Label(type_frame, text="站点:").pack(side="left")
-        self.site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        self.site_var = tk.StringVar()
         site_combo = ttk.Combobox(type_frame, textvariable=self.site_var,
-                                  values=["https://ml0987.xyz", "https://hsex.icu", "https://hsex.men", "https://hsex.tv"],
+                                  values=[""] + list(MIRROR_SITES.values()),
                                   width=16, state="readonly")
         site_combo.pack(side="left", padx=(5, 20))
         ttk.Label(type_frame, text="列表:").pack(side="left")
@@ -299,9 +299,9 @@ class App:
         row1 = ttk.Frame(control_frame)
         row1.pack(fill="x", pady=3)
         ttk.Label(row1, text="站点:").pack(side="left")
-        self.search_site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        self.search_site_var = tk.StringVar()
         site_combo = ttk.Combobox(row1, textvariable=self.search_site_var,
-                                  values=["https://ml0987.xyz", "https://hsex.icu", "https://hsex.men", "https://hsex.tv"],
+                                  values=[""] + list(MIRROR_SITES.values()),
                                   width=16, state="readonly")
         site_combo.pack(side="left", padx=(5, 15))
         ttk.Label(row1, text="类型:").pack(side="left")
@@ -455,6 +455,10 @@ class App:
             messagebox.showwarning("警告", "请输入搜索关键词")
             return
 
+        if not self.search_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
+            return
+
         # 清空旧列表
         for widget in self._author_inner_frame.winfo_children():
             widget.destroy()
@@ -529,6 +533,10 @@ class App:
         """下载选中作者的视频"""
         if self.crawl_thread and self.crawl_thread.is_alive():
             messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        if not self.search_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
             return
 
         selected = [author for var, author in self._author_check_vars if var.get()]
@@ -606,9 +614,9 @@ class App:
 
         # 站点选择
         ttk.Label(top_frame, text="站点:").pack(side="left")
-        self.single_site_var = tk.StringVar(value=self.config.get("site", "https://ml0987.xyz"))
+        self.single_site_var = tk.StringVar()
         site_combo = ttk.Combobox(top_frame, textvariable=self.single_site_var,
-                                  values=list(MIRROR_SITES.values()), width=14, state="readonly")
+                                  values=[""] + list(MIRROR_SITES.values()), width=14, state="readonly")
         site_combo.pack(side="left", padx=(2, 10))
 
         # 列表类型
@@ -760,6 +768,9 @@ class App:
 
     def _load_single_page(self):
         """加载当前页的视频列表"""
+        if not self.single_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
+            return
         page = self.single_page_var.get()
         site = self.single_site_var.get()
         type_name = self.single_type_var.get()
@@ -885,6 +896,10 @@ class App:
 
     def _start_single_batch(self):
         """批量下载勾选的视频"""
+        if not self.single_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
+            return
+
         selected = [(var, video) for var, video in self._single_check_vars if var.get()]
         if not selected:
             messagebox.showwarning("警告", "请至少勾选一个视频")
@@ -968,6 +983,9 @@ class App:
         url = self.url_var.get().strip()
         if not url:
             messagebox.showwarning("警告", "请输入视频 URL")
+            return
+        if not self.single_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
             return
         if self.crawl_thread and self.crawl_thread.is_alive():
             messagebox.showwarning("警告", "正在运行中，请先停止")
@@ -1327,7 +1345,7 @@ class App:
 
     def _save_settings(self):
         self.config["output_dir"] = self.save_dir_var.get()
-        self.config["site"] = self.site_var.get()
+        self.config["site"] = self.site_var.get() or "https://ml0987.xyz"
         self.config["title_with_author"] = self.title_with_author_var.get()
         self.config["sort_by_upload_date"] = self.sort_by_upload_date_var.get()
         self.config["proxy_enabled"] = self.proxy_enabled_var.get()
@@ -1564,6 +1582,10 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
+        if not self.search_site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
+            return
+
         keyword = self.search_keyword_var.get().strip()
         if not keyword:
             messagebox.showwarning("警告", "请输入搜索关键词")
@@ -1632,6 +1654,10 @@ class App:
         """开始批量爬取"""
         if self.crawl_thread and self.crawl_thread.is_alive():
             messagebox.showwarning("警告", "正在运行中，请先停止")
+            return
+
+        if not self.site_var.get().strip():
+            messagebox.showwarning("警告", "请先选择站点")
             return
 
         # 自动展开日志
