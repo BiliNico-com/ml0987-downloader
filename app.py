@@ -507,6 +507,7 @@ class App:
             log_callback=self._log_to_ui,
             progress_callback=on_progress,
             info_callback=self._update_search_cover_preview,
+            confirm_callback=self._confirm_dialog,
             base_url=self.search_site_var.get(),
         )
 
@@ -889,6 +890,109 @@ class App:
     def _append_text(self, widget, text):
         widget.insert(tk.END, f"{text}\n")
         widget.see(tk.END)
+
+    def _confirm_dialog(self, opts: dict) -> str:
+        """倒计时确认弹窗（线程安全），返回用户选择的 value
+        opts: {
+            "title": str,
+            "message": str,
+            "choices": [(value, label), ...],
+            "default": value,   # 默认选中
+            "countdown": int     # 秒数
+        }
+        """
+        import threading
+
+        result = {"value": opts.get("default", opts["choices"][0][0])}
+        ready = threading.Event()
+
+        def _show():
+            try:
+                dialog = tk.Toplevel(self.root)
+                dialog.title(opts.get("title", "提示"))
+                dialog.geometry("480x220")
+                dialog.resizable(False, False)
+                dialog.attributes("-topmost", True)
+                dialog.grab_set()
+
+                # 居中
+                dialog.update_idletasks()
+                x = (dialog.winfo_screenwidth() // 2) - 240
+                y = (dialog.winfo_screenheight() // 2) - 110
+                dialog.geometry(f"480x220+{x}+{y}")
+
+                # 消息
+                msg_frame = tk.Frame(dialog, pady=10)
+                msg_frame.pack(fill="both", expand=True)
+                tk.Label(
+                    msg_frame, text=opts.get("message", ""),
+                    justify="left", wraplength=440,
+                    font=("Microsoft YaHei", 10)
+                ).pack(padx=20)
+
+                countdown_label = tk.Label(
+                    msg_frame, text="",
+                    font=("Microsoft YaHei", 9), fg="#888"
+                )
+                countdown_label.pack(pady=(5, 0))
+
+                btn_frame = tk.Frame(dialog, pady=10)
+                btn_frame.pack()
+
+                remaining = {"count": opts.get("countdown", 10)}
+                selected = {"value": opts.get("default", opts["choices"][0][0])}
+                timer_job = {"id": None}
+
+                def update_countdown():
+                    if remaining["count"] > 0:
+                        countdown_label.config(text=f"【{remaining['count']} 秒后自动选择「{
+                            next(l for v, l in opts['choices'] if v == selected['value'])
+                        }」】")
+                        remaining["count"] -= 1
+                        timer_job["id"] = dialog.after(1000, update_countdown)
+                    else:
+                        # 超时，选默认值
+                        dialog.destroy()
+
+                def on_select(value, label):
+                    if timer_job["id"]:
+                        dialog.after_cancel(timer_job["id"])
+                    selected["value"] = value
+                    result["value"] = value
+                    ready.set()
+                    dialog.destroy()
+
+                # 创建按钮
+                for value, label in opts["choices"]:
+                    color = "#4CAF50" if value == opts.get("default") else "#ccc"
+                    fg = "white" if value == opts.get("default") else "#333"
+                    btn = tk.Button(
+                        btn_frame, text=label, font=("Microsoft YaHei", 10),
+                        width=14, relief="flat", bd=2,
+                        bg=color, fg=fg,
+                        activebackground=color, activeforeground=fg,
+                        cursor="hand2",
+                        command=lambda v=value, l=label: on_select(v, l)
+                    )
+                    btn.pack(side="left", padx=8)
+
+                # ESC 键默认选否
+                def on_esc(e):
+                    if opts["choices"]:
+                        on_select(opts["choices"][-1][0], opts["choices"][-1][1])
+                dialog.bind("<Escape>", on_esc)
+
+                timer_job["id"] = dialog.after(1000, update_countdown)
+                dialog.protocol("WM_DELETE_WINDOW", lambda: on_select(
+                    opts["choices"][-1][0], opts["choices"][-1][1]
+                ))
+            except Exception:
+                result["value"] = opts.get("default", opts["choices"][0][0])
+                ready.set()
+
+        self.root.after(0, _show)
+        ready.wait(timeout=opts.get("countdown", 10) + 2)
+        return result["value"]
 
     def _update_progress(self, progressbar, current, total, label_widget=None, label_text=None):
         """更新进度条（线程安全）"""

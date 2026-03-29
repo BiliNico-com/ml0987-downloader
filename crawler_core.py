@@ -281,22 +281,64 @@ class TSDownloader:
         self.stop_check = stop_check  # 可调用对象，返回 True 时停止
         self._key_cache: Optional[bytes] = None
         self._stopped = False
+        self._failed_indices: List[int] = []  # 记录最终仍失败的切片索引
 
-    def download(self) -> bool:
-        """并发下载并合并"""
+    def download(self):
+        """并发下载并合并，支持失败重试
+        Returns:
+            Tuple[bool, List[int]]: (是否成功, 仍失败的切片索引列表)
+        """
+        self._failed_indices = []
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
         temp_file = self.output_file.with_suffix('.ts.tmp')
 
+        results = [None] * len(self.segments)
+        failed_indices = set()
+
         try:
-            with open(temp_file, 'wb') as f:
+            # ------ 第一轮下载 ------
+            with ThreadPoolExecutor(max_workers=self.threads) as executor:
+                future_to_index = {
+                    executor.submit(self._download_segment, idx, url, iv): idx
+                    for idx, (url, iv) in enumerate(self.segments)
+                }
+
+                completed_count = 0
+                for future in as_completed(future_to_index):
+                    if self.stop_check and self.stop_check():
+                        self._stopped = True
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+                    idx = future_to_index[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as e:
+                        logger.error(f"切片 {idx+1} 失败: {e}")
+                        failed_indices.add(idx)
+
+                    completed_count += 1
+                    if self.progress_callback:
+                        self.progress_callback(completed_count, len(self.segments))
+
+                if self._stopped:
+                    logger.info("下载已中断")
+                    return (False, [])
+
+            # ------ 重试失败的切片（最多 3 轮）------
+            for retry_round in range(1, 4):
+                if not failed_indices:
+                    break
+                logger.info(f"重试第 {retry_round} 轮，{len(failed_indices)} 个切片失败")
+                still_failed = set()
+
                 with ThreadPoolExecutor(max_workers=self.threads) as executor:
                     future_to_index = {
-                        executor.submit(self._download_segment, idx, url, iv): idx
-                        for idx, (url, iv) in enumerate(self.segments)
+                        executor.submit(self._download_segment, idx,
+                                        self.segments[idx][0],
+                                        self.segments[idx][1]): idx
+                        for idx in failed_indices
                     }
-
-                    results = [None] * len(self.segments)
-                    completed_count = 0
 
                     for future in as_completed(future_to_index):
                         if self.stop_check and self.stop_check():
@@ -308,33 +350,53 @@ class TSDownloader:
                         try:
                             results[idx] = future.result()
                         except Exception as e:
-                            logger.error(f"切片 {idx+1} 失败: {e}")
+                            logger.error(f"切片 {idx+1} 重试失败: {e}")
+                            still_failed.add(idx)
 
-                        completed_count += 1
-                        if self.progress_callback:
-                            self.progress_callback(completed_count, len(self.segments))
+                    failed_indices = still_failed
 
-                    if self._stopped:
-                        logger.info("下载已中断")
-                        return False
+                if self._stopped:
+                    return (False, list(failed_indices))
 
-                    # 按顺序写入文件
-                    for data in results:
-                        if data:
-                            f.write(data)
+            # ------ 检查成功率 ------
+            missing = [i for i, d in enumerate(results) if d is None]
+            self._failed_indices = missing
+            total = len(self.segments)
+            success_count = total - len(missing)
+            success_rate = success_count / total * 100
 
-            return self._convert_to_mp4(temp_file)
+            if missing:
+                logger.warning(f"有 {len(missing)} 个切片下载失败（{success_count}/{total}，成功率 {success_rate:.1f}%）")
+                if success_rate < 50:
+                    logger.error("成功率低于 50%，放弃转换")
+                    try:
+                        if temp_file.exists():
+                            temp_file.unlink()
+                    except Exception:
+                        pass
+                    return (False, missing)
+                logger.warning("将写入可用切片继续尝试")
+
+            # ------ 写入文件 ------
+            with open(temp_file, 'wb') as f:
+                for idx, data in enumerate(results):
+                    if data:
+                        f.write(data)
+                    else:
+                        logger.debug(f"跳过缺失切片 {idx+1}")
+
+            ok = self._convert_to_mp4(temp_file)
+            return (ok, missing if not ok else [])
 
         except Exception as e:
             logger.error(f"下载失败: {e}")
-            # 清理临时文件
             try:
                 if temp_file.exists():
                     temp_file.unlink()
                     logger.info(f"已清理临时文件: {temp_file}")
             except Exception:
                 pass
-            return False
+            return (False, [])
 
     def _download_segment(self, idx: int, url: str, iv: Optional[bytes]) -> Optional[bytes]:
         """下载单个切片（含解密）"""
@@ -369,7 +431,6 @@ class TSDownloader:
             ffmpeg_bin = Path(__file__).parent / "ffmpeg.exe"
 
         if not ffmpeg_bin.exists():
-            # 尝试系统 PATH
             ffmpeg_bin = Path("ffmpeg")
 
         try:
@@ -408,11 +469,13 @@ class CrawlerCore:
 
     HISTORY_FILE = "download_history.json"
 
-    def __init__(self, config: dict, log_callback=None, progress_callback=None, info_callback=None, base_url: str = None):
+    def __init__(self, config: dict, log_callback=None, progress_callback=None,
+                 info_callback=None, confirm_callback=None, base_url: str = None):
         self.config = config
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.info_callback = info_callback
+        self.confirm_callback = confirm_callback  # 确认弹窗回调
         self._stop_flag = False
         self.base_url = (base_url or config.get("site", "https://ml0987.xyz")).rstrip("/")
         self.session = requests.Session()
@@ -632,10 +695,13 @@ class CrawlerCore:
             session=self.session,
         )
 
-        success = downloader.download()
+        success, failed_segs = downloader.download()
 
         if success:
-            self._log(f"下载完成: {title}")
+            if failed_segs:
+                self._log(f"下载完成（有 {len(failed_segs)} 个切片缺失）: {title}", "warn")
+            else:
+                self._log(f"下载完成: {title}")
             if vid:
                 self._mark_downloaded(vid, title, url, upload_date)
         else:
@@ -706,13 +772,16 @@ class CrawlerCore:
                     except Exception:
                         pass
 
-                if self.download_single(url, title, video_id=vid):
-                    # 判断是真正下载了还是跳过了
-                    if vid and self._history.get(vid, {}).get("download_time"):
-                        # 刚标记的，是本次下载的
-                        total_success += 1
-                    else:
-                        total_skipped += 1
+                try:
+                    ok = self.download_single(url, title, video_id=vid)
+                    if ok:
+                        # 判断是真正下载了还是跳过了
+                        if vid and self._history.get(vid, {}).get("download_time"):
+                            total_success += 1
+                        else:
+                            total_skipped += 1
+                except Exception as e:
+                    self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
 
                 time.sleep(2)
 
@@ -770,11 +839,15 @@ class CrawlerCore:
                     except Exception:
                         pass
 
-                if self.download_single(url, title, video_id=vid):
-                    if vid and self._history.get(vid, {}).get("download_time"):
-                        total_success += 1
-                    else:
-                        total_skipped += 1
+                try:
+                    ok = self.download_single(url, title, video_id=vid)
+                    if ok:
+                        if vid and self._history.get(vid, {}).get("download_time"):
+                            total_success += 1
+                        else:
+                            total_skipped += 1
+                except Exception as e:
+                    self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
 
                 time.sleep(2)
 
@@ -899,9 +972,13 @@ class CrawlerCore:
         """爬取指定作者的视频列表并下载，返回 {success: int, skipped: int}
         
         下载的视频会放到 downloads/{日期}/{作者ID}/ 目录下方便归档
+        每个作者完成后会弹出提示（若有失败视频则询问是否重试），
+        全部作者完成后询问是否继续下一作者，支持 10 秒倒计时自动确认。
         """
         total_success = 0
         total_skipped = 0
+        # 按作者记录失败视频: { author_name: [(url, title, vid), ...] }
+        failed_by_author: Dict[str, List[tuple]] = {}
 
         for author_info in authors:
             if self._stop_flag:
@@ -912,6 +989,9 @@ class CrawlerCore:
             author_url = author_info.get("url", "")
             self._log(f"===== 开始爬取作者: {author_name} =====")
 
+            failed_by_author[author_name] = []
+            author_success = 0
+            author_skipped = 0
             # 作者子目录名：使用作者 param（ID），清理非法字符
             author_dir_name = sanitize_filename(author_param)
 
@@ -949,6 +1029,7 @@ class CrawlerCore:
                     if vid and self._is_downloaded(vid):
                         self._log(f"  [{idx}/{len(video_list)}] 已下载过，跳过: {title}")
                         total_skipped += 1
+                        author_skipped += 1
                         continue
 
                     self._log(f"  [{idx}/{len(video_list)}] {title}")
@@ -967,15 +1048,87 @@ class CrawlerCore:
                         date_str = datetime.now().strftime("%Y-%m-%d")
                     author_output_dir = output_root / date_str / author_dir_name
 
-                    if self.download_single(url, title, video_id=vid, output_dir=author_output_dir):
-                        if vid and self._history.get(vid, {}).get("download_time"):
-                            total_success += 1
+                    try:
+                        ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
+                        if ok:
+                            if vid and self._history.get(vid, {}).get("download_time"):
+                                total_success += 1
+                                author_success += 1
+                            else:
+                                total_skipped += 1
+                                author_skipped += 1
                         else:
-                            total_skipped += 1
+                            # 下载失败（含切片缺失），记录到失败列表
+                            failed_by_author[author_name].append((url, title, vid))
+                    except Exception as e:
+                        self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+                        failed_by_author[author_name].append((url, title, vid))
 
                     time.sleep(2)
 
-            self._log(f"===== 作者 {author_name} 完成 =====")
+            # ===== 作者下载完毕，弹出提示 =====
+            total_videos = author_success + author_skipped + len(failed_by_author[author_name])
+            self._log(f"===== 作者 {author_name} 完成：已下载 {author_success + author_skipped}/{total_videos} =====")
+
+            if self.confirm_callback:
+                failed = failed_by_author[author_name]
+                if failed:
+                    # 有失败视频，询问是否重试
+                    msg = (
+                        f"作者「{author_name}」视频下载完成\n"
+                        f"已下载: {author_success + author_skipped} / 共 {total_videos}\n"
+                        f"未完成: {len(failed)} 个\n\n"
+                        f"是否重新下载未完成的 {len(failed)} 个视频？"
+                    )
+                    choice = self.confirm_callback({
+                        "title": "作者视频下载完成",
+                        "message": msg,
+                        "choices": [("retry", f"是，重新下载 ({len(failed)} 个)"), ("skip", "否，跳过")],
+                        "default": "retry",
+                        "countdown": 10,
+                    })
+                    if choice == "retry" and not self._stop_flag:
+                        self._log(f"开始重试 {len(failed)} 个未完成视频...")
+                        for url, title, vid in failed:
+                            if self._stop_flag:
+                                break
+                            try:
+                                ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
+                                if ok:
+                                    if vid and self._history.get(vid, {}).get("download_time"):
+                                        total_success += 1
+                                        author_success += 1
+                                    else:
+                                        total_skipped += 1
+                                        author_skipped += 1
+                                    # 重试成功的从失败列表移除
+                                    failed_by_author[author_name].remove((url, title, vid))
+                            except Exception as e:
+                                self._log(f"重试失败: {title} ({e})", "error")
+                            time.sleep(2)
+                        self._log(f"重试完成，剩余 {len(failed_by_author[author_name])} 个未完成")
+
+            # ===== 询问是否继续下一作者 =====
+            remaining = authors.index(author_info) + 1
+            if remaining < len(authors) and self.confirm_callback and not self._stop_flag:
+                next_author = authors[remaining].get("name", "未知作者")
+                still_failed = len(failed_by_author[author_name])
+                msg = (
+                    f"作者「{author_name}」全部处理完毕\n"
+                    f"已下载: {author_success + author_skipped}/{total_videos}"
+                    + (f"\n未完成: {still_failed} 个" if still_failed else "")
+                    + f"\n\n是否继续下载下一作者「{next_author}」？"
+                )
+                choice = self.confirm_callback({
+                    "title": "是否继续下一作者",
+                    "message": msg,
+                    "choices": [("yes", "是，继续下载"), ("no", "否，停止")],
+                    "default": "yes",
+                    "countdown": 10,
+                })
+                if choice != "yes":
+                    self._log("用户停止，退出批量下载")
+                    break
 
         self._log(f"作者爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
         return {"success": total_success, "skipped": total_skipped}
