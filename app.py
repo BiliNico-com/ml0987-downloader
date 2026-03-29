@@ -515,6 +515,10 @@ class App:
                 self.search_slice_label,
                 f"切片: {pct}"
             )
+            # 新视频切片开始下载时，重置合并进度条
+            if current <= 1:
+                self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.search_merge_label.config(text="切片下载中..."))
 
         def on_merge_progress(percent, speed):
             self.root.after(0, lambda: self.search_merge_progress.configure(value=percent))
@@ -1094,6 +1098,10 @@ class App:
                 self.search_slice_label,
                 f"切片: {pct}"
             )
+            # 新视频切片开始下载时，重置合并进度条
+            if current <= 1:
+                self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.search_merge_label.config(text="切片下载中..."))
 
         self.crawler = CrawlerCore(
             self.config,
@@ -1148,6 +1156,10 @@ class App:
                 self.crawl_slice_label,
                 f"切片: {pct}"
             )
+            # 新视频切片开始下载时，重置合并进度条
+            if current <= 1:
+                self.root.after(0, lambda: self.crawl_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.crawl_merge_label.config(text="切片下载中..."))
 
         self.crawler = CrawlerCore(
             self.config,
@@ -1207,6 +1219,10 @@ class App:
                 self.single_slice_label,
                 f"切片: {pct}"
             )
+            # 切片开始下载时，重置合并进度条
+            if current <= 1:
+                self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
+                self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
 
         self.crawler = CrawlerCore(
             self.config,
