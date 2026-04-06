@@ -810,7 +810,24 @@ class App:
             self.single_status_label.config(text="当前页没有视频")
             return
 
-        self.single_status_label.config(text=f"第 {self.single_page_var.get()} 页 — 共 {len(videos)} 个视频")
+        # 统计已下载个数
+        downloaded = 0
+        try:
+            history_path = Path(self.config.get("output_dir", APP_DIR / "downloads")) / "download_history.json"
+            if history_path.exists():
+                import json as _json
+                history = _json.loads(history_path.read_text(encoding="utf-8"))
+                for v in videos:
+                    if v.get("id") in history:
+                        downloaded += 1
+        except Exception:
+            pass
+
+        total = len(videos)
+        if downloaded > 0:
+            self.single_status_label.config(text=f"第 {self.single_page_var.get()} 页 — 共 {total} 个视频（已下载 {downloaded}/{total}）")
+        else:
+            self.single_status_label.config(text=f"第 {self.single_page_var.get()} 页 — 共 {total} 个视频")
 
         # 计算列数（根据窗口宽度自适应，默认 3 列）
         cols = 3
@@ -1611,6 +1628,25 @@ class App:
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text="切片下载中..."))
 
+        # 搜索统计回调：预扫描完成后更新状态栏
+        def on_search_stats(stats: dict):
+            total = stats["total"]
+            downloaded = stats["downloaded"]
+            pending = stats["pending"]
+            self.root.after(0, lambda: self.search_overall_label.config(
+                text=f"总计 {total} 个视频（已下载 {downloaded}/待下载 {pending}/{总计 {total}）"
+            ))
+
+        # 搜索进度回调：每个视频处理完后实时更新
+        def on_search_progress(done: int, to_process: int, total: int):
+            # done: 已处理数（已跳过+新下载），to_process: 需要处理的视频总数
+            new_done = sum(1 for vid in list(self.crawler._history.keys())
+                          if self.crawler._history[vid].get("download_time"))
+            # 用 crawler 内部计数更准确：new_success + skipped_so_far
+            self.root.after(0, lambda d=done, t=total: self.search_overall_label.config(
+                text=f"已处理 {d}/{t} 个视频"
+            ))
+
         self.crawler = CrawlerCore(
             self.config,
             log_callback=self._log_to_search_ui,
@@ -1622,10 +1658,13 @@ class App:
                 self.search_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
             ]),
         )
+        # 注入搜索专用回调
+        self.crawler.search_stats_callback = on_search_stats
+        self.crawler.search_progress_callback = on_search_progress
 
         def run():
             try:
-                self.root.after(0, lambda: self.search_overall_label.config(text="正在搜索下载..."))
+                self.root.after(0, lambda: self.search_overall_label.config(text="正在预扫描搜索结果..."))
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text=""))
                 result = self.crawler.crawl_search(
@@ -1636,8 +1675,9 @@ class App:
                 )
                 success = result.get("success", 0)
                 skipped = result.get("skipped", 0)
+                total_all = success + skipped
                 self.root.after(0, lambda: self.search_overall_label.config(
-                    text=f"完成 — 新下载: {success}，跳过: {skipped}"
+                    text=f"完成 — 新下载: {success}，跳过: {skipped}（总计 {total_all}）"
                 ))
                 self._status_to_ui(self.search_status_text, f"── 搜索下载完成（新下载: {success}，跳过: {skipped}） ──")
             except Exception as e:

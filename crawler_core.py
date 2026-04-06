@@ -58,7 +58,6 @@ MIRROR_SITES = {
     "ml0987.xyz": "https://ml0987.xyz",
     "hsex.icu":   "https://hsex.icu",
     "hsex.men":   "https://hsex.men",
-    "hsex.tv":    "https://hsex.tv",
 }
 
 # 通用请求头（Referer 使用占位符，运行时替换）
@@ -852,55 +851,88 @@ class CrawlerCore:
         self._log(f"搜索关键词: {keyword}，排序: {sort}，页码: {page_start}-{page_end}")
         self._log(f"已下载记录: {len(self._history)} 个视频")
 
+        # ===== 预扫描阶段：收集所有视频，计算总数 / 已下载 / 待下载 =====
+        all_videos = []  # [(page, video_dict), ...]
         for page in range(page_start, page_end + 1):
-            if self._stop_flag:
-                break
-
-            self._log(f"正在搜索第 {page} 页...")
-
             search_url = f"{self.base_url}/search.htm?search={quote(keyword)}&sort={sort}&page={page}"
             video_list = self._extract_search_results(search_url)
             if not video_list:
                 self._log(f"第 {page} 页未发现视频", "warn")
                 continue
+            for v in video_list:
+                all_videos.append((page, v))
 
-            self._log(f"发现 {len(video_list)} 个视频")
+        all_count = len(all_videos)
+        already_downloaded = sum(1 for _, v in all_videos if v.get("id") and self._is_downloaded(v["id"]))
+        pending_count = all_count - already_downloaded
 
-            for idx, video in enumerate(video_list, 1):
-                if self._stop_flag:
-                    break
+        self._log(f"预扫描完成: 总计 {all_count} 个视频，已下载 {already_downloaded}，待下载 {pending_count}")
 
-                url = video["url"]
-                vid = video.get("id")
-                title = video.get("title") or f"搜索_第{page}页_第{idx}个"
-                cover = video.get("cover") or ""
+        # 通知 UI 层统计数据（如果支持）
+        if hasattr(self, 'search_stats_callback') and self.search_stats_callback:
+            try:
+                self.search_stats_callback({
+                    "total": all_count,
+                    "downloaded": already_downloaded,
+                    "pending": pending_count,
+                })
+            except Exception:
+                pass
 
-                # 防重复检查
-                if vid and self._is_downloaded(vid):
-                    self._log(f"[{idx}/{len(video_list)}] 已下载过，跳过: {title}")
-                    total_skipped += 1
-                    continue
+        # ===== 正式下载阶段 =====
+        processed = 0  # 已处理数（含跳过 + 新下载）
 
-                self._log(f"[{idx}/{len(video_list)}] {title}")
-                self._log(f"  {url}")
+        for page_idx, (page, video) in enumerate(all_videos):
+            if self._stop_flag:
+                break
 
-                if hasattr(self, 'info_callback') and self.info_callback and cover:
+            url = video["url"]
+            vid = video.get("id")
+            title = video.get("title") or f"搜索_第{page}页_第{page_idx+1}个"
+            cover = video.get("cover") or ""
+            processed += 1
+
+            # 防重复检查
+            if vid and self._is_downloaded(vid):
+                self._log(f"[{processed}/{all_count}] 已下载过，跳过: {title}")
+                total_skipped += 1
+                # 实时更新进度
+                if hasattr(self, 'search_progress_callback') and self.search_progress_callback:
                     try:
-                        self.info_callback({"title": title, "cover": cover})
+                        cur_done = total_success + total_skipped
+                        self.search_progress_callback(cur_done, already_downloaded + pending_count, all_count)
                     except Exception:
                         pass
+                continue
 
+            self._log(f"[{processed}/{all_count}] {title}")
+            self._log(f"  {url}")
+
+            if hasattr(self, 'info_callback') and self.info_callback and cover:
                 try:
-                    ok = self.download_single(url, title, video_id=vid)
-                    if ok:
-                        if vid and self._history.get(vid, {}).get("download_time"):
-                            total_success += 1
-                        else:
-                            total_skipped += 1
-                except Exception as e:
-                    self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+                    self.info_callback({"title": title, "cover": cover})
+                except Exception:
+                    pass
 
-                time.sleep(2)
+            try:
+                ok = self.download_single(url, title, video_id=vid)
+                if ok:
+                    if vid and self._history.get(vid, {}).get("download_time"):
+                        total_success += 1
+                    else:
+                        total_skipped += 1
+            except Exception as e:
+                self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+
+            # 实时更新进度
+            if hasattr(self, 'search_progress_callback') and self.search_progress_callback:
+                try:
+                    cur_done = total_success + total_skipped
+                    self.search_progress_callback(cur_done, already_downloaded + pending_count, all_count)
+                except Exception:
+                    pass
+
+            time.sleep(2)
 
         self._log(f"搜索爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
         return {"success": total_success, "skipped": total_skipped}
