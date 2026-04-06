@@ -157,6 +157,12 @@ class App:
         self._batch_done_videos = 0
         self._batch_success = 0
 
+        # 创建 UI
+        self._create_widgets()
+
+        # 启动时静默检查环境，出错才提示
+        self._silent_env_check()
+
     @staticmethod
     def _format_bytes(b: float) -> str:
         """将字节数格式化为可读字符串"""
@@ -170,12 +176,6 @@ class App:
     def _format_speed(bps: float) -> str:
         """将字节/秒格式化为速度字符串（如 2.5 MB/s）"""
         return App._format_bytes(bps) + "/s"
-
-        # 创建 UI
-        self._create_widgets()
-
-        # 启动时静默检查环境，出错才提示
-        self._silent_env_check()
 
     def _create_widgets(self):
         """创建界面组件"""
