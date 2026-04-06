@@ -1831,7 +1831,7 @@ class App:
                 self.root.after(0, lambda: self.crawl_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.crawl_merge_label.config(text="切片下载中..."))
                 # 重置速度/流量显示
-                self.root.after(0, lambda: self.crawl_speed_label.text="速度: --")
+                self.root.after(0, lambda: self.crawl_speed_label.config(text="速度: --"))
                 self.root.after(0, lambda: self.crawl_traffic_label.config(text="流量: 0 B"))
 
         def on_speed(global_speed_bps, total_bytes):
