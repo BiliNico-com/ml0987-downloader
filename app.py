@@ -1634,7 +1634,7 @@ class App:
             downloaded = stats["downloaded"]
             pending = stats["pending"]
             self.root.after(0, lambda: self.search_overall_label.config(
-                text=f"总计 {total} 个视频（已下载 {downloaded}/待下载 {pending}/{总计 {total}）"
+                text="总计 {} 个视频（已下载 {}/待下载 {}/{})".format(total, downloaded, pending, total)
             ))
 
         # 搜索进度回调：每个视频处理完后实时更新
