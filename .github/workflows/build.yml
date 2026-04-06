@@ -115,8 +115,8 @@ jobs:
             - 自动检测作者总页数
             - 按视频上传日期分类
             - 防重复下载
-            - 多域名 + SOCKS5 代理
             - 封面预览 + 切片进度
+            - 流量显示
           files: |
             dist/ml0987_downloader_${{ steps.version.outputs.VERSION }}.zip
           draft: false
