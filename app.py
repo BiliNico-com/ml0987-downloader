@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+import subprocess
 import io
 from pathlib import Path
 
@@ -156,6 +157,20 @@ class App:
         self._batch_done_videos = 0
         self._batch_success = 0
 
+    @staticmethod
+    def _format_bytes(b: float) -> str:
+        """将字节数格式化为可读字符串"""
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if b < 1024:
+                return f"{b:.1f} {unit}" if unit != 'B' else f"{int(b)} {unit}"
+            b /= 1024
+        return f"{b:.2f} TB"
+
+    @staticmethod
+    def _format_speed(bps: float) -> str:
+        """将字节/秒格式化为速度字符串（如 2.5 MB/s）"""
+        return App._format_bytes(bps) + "/s"
+
         # 创建 UI
         self._create_widgets()
 
@@ -273,6 +288,14 @@ class App:
         self.crawl_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
         self.crawl_merge_progress.pack(fill="x", pady=(3, 5))
 
+        # 速度 + 已下载流量
+        speed_row = ttk.Frame(right_frame)
+        speed_row.pack(fill="x")
+        self.crawl_speed_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="w", fg="#1976D2")
+        self.crawl_speed_label.pack(side="left")
+        self.crawl_traffic_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="e", fg="#555")
+        self.crawl_traffic_label.pack(side="right")
+
         # 日志折叠按钮 + 日志框
         self._crawl_log_visible = False
         crawl_log_btn_frame = ttk.Frame(right_frame)
@@ -295,25 +318,37 @@ class App:
         control_frame = ttk.LabelFrame(self.tab_search, text="搜索设置", padding=10)
         control_frame.pack(fill="x", padx=20, pady=(10, 5))
 
-        # 第一行：域名 + 搜索类型 + 关键词
+        # 第一行：域名 + 搜索类型 + 关键词 + 统计标签
         row1 = ttk.Frame(control_frame)
         row1.pack(fill="x", pady=3)
-        ttk.Label(row1, text="站点:").pack(side="left")
+        left_part = ttk.Frame(row1)
+        left_part.pack(side="left", fill="x", expand=True)
+        ttk.Label(left_part, text="站点:").pack(side="left")
         self.search_site_var = tk.StringVar()
-        site_combo = ttk.Combobox(row1, textvariable=self.search_site_var,
+        site_combo = ttk.Combobox(left_part, textvariable=self.search_site_var,
                                   values=[""] + list(MIRROR_SITES.values()),
                                   width=16, state="readonly")
         site_combo.pack(side="left", padx=(5, 15))
-        ttk.Label(row1, text="类型:").pack(side="left")
+        ttk.Label(left_part, text="类型:").pack(side="left")
         self.search_type_var = tk.StringVar(value="搜视频")
-        type_combo = ttk.Combobox(row1, textvariable=self.search_type_var,
+        type_combo = ttk.Combobox(left_part, textvariable=self.search_type_var,
                                   values=["搜视频", "搜作者"], width=8, state="readonly")
         type_combo.pack(side="left", padx=(5, 15))
-        ttk.Label(row1, text="关键词:").pack(side="left")
+        ttk.Label(left_part, text="关键词:").pack(side="left")
         self.search_keyword_var = tk.StringVar()
-        search_entry = ttk.Entry(row1, textvariable=self.search_keyword_var, width=20)
+        search_entry = ttk.Entry(left_part, textvariable=self.search_keyword_var, width=20)
         search_entry.pack(side="left", padx=5)
         search_entry.bind("<Return>", lambda e: self._on_search_action())
+
+        # 右侧统计标签：已搜索 / 已下载
+        stats_part = ttk.Frame(row1)
+        stats_part.pack(side="right", padx=(10, 0))
+        self.search_stats_found_label = tk.Label(stats_part, text="", font=("Microsoft YaHei", 11, "bold"),
+                                                  fg="#d32f2f")
+        self.search_stats_found_label.pack(side="left", padx=(0, 15))
+        self.search_stats_done_label = tk.Label(stats_part, text="", font=("Microsoft YaHei", 11, "bold"),
+                                                 fg="#d32f2f")
+        self.search_stats_done_label.pack(side="left")
 
         # 第二行：排序 + 页码 + 按钮（搜视频模式）
         self.search_video_frame = ttk.Frame(control_frame)
@@ -410,6 +445,14 @@ class App:
         self.search_merge_progress = ttk.Progressbar(right_frame, mode="determinate")
         self.search_merge_progress.pack(fill="x", pady=(3, 5))
 
+        # 速度 + 已下载流量
+        speed_row = ttk.Frame(right_frame)
+        speed_row.pack(fill="x")
+        self.search_speed_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="w", fg="#1976D2")
+        self.search_speed_label.pack(side="left")
+        self.search_traffic_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="e", fg="#555")
+        self.search_traffic_label.pack(side="right")
+
         # 日志折叠按钮 + 日志框
         self._search_log_visible = False
         search_log_btn_frame = ttk.Frame(right_frame)
@@ -493,6 +536,8 @@ class App:
             def show_results():
                 if not authors:
                     self.search_overall_label.config(text=f"未找到匹配的作者: {keyword}")
+                    self.search_stats_found_label.config(text="")
+                    self.search_stats_done_label.config(text="")
                     return
 
                 # 找出最大页数，用于设置 Spinbox 的上限
@@ -503,6 +548,11 @@ class App:
                 self.search_overall_label.config(
                     text=f"找到 {len(authors)} 个作者（最多 {max_pages} 页）"
                 )
+
+                # 计算选中作者的总视频数并显示
+                total_videos = sum(a.get("count", 0) for a in authors)
+                self.search_stats_found_label.config(text=f"已搜索{total_videos}个视频")
+                self.search_stats_done_label.config(text="已下载0个视频")
 
                 for author in authors:
                     var = tk.BooleanVar(value=True)
@@ -562,6 +612,8 @@ class App:
             if current <= 1:
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text="切片下载中..."))
+                self.root.after(0, lambda: self.search_speed_label.config(text="速度: --"))
+                self.root.after(0, lambda: self.search_traffic_label.config(text="流量: 0 B"))
 
         def on_merge_progress(percent, speed):
             self.root.after(0, lambda: self.search_merge_progress.configure(value=percent))
@@ -569,6 +621,12 @@ class App:
             self.root.after(0, lambda: self.search_merge_label.config(
                 text=f"合并 MP4: {percent}%{speed_text}"
             ))
+
+        def on_speed(global_speed_bps, total_bytes):
+            self.root.after(0, lambda s=global_speed_bps, t=total_bytes: [
+                self.search_speed_label.config(text=f"速度: {self._format_speed(s)}"),
+                self.search_traffic_label.config(text=f"流量: {self._format_bytes(t)}"),
+            ])
 
         self.crawler = CrawlerCore(
             self.config,
@@ -578,7 +636,15 @@ class App:
             confirm_callback=self._confirm_dialog,
             base_url=self.search_site_var.get(),
             merge_progress_callback=on_merge_progress,
+            speed_callback=on_speed,
         )
+
+        # 整体进度回调：实时更新"已下载XX个视频"标签
+        def on_overall_progress(done: int):
+            self.root.after(0, lambda d=done: self.search_stats_done_label.config(
+                text=f"已下载{d}个视频"
+            ))
+        self.crawler.overall_progress_callback = on_overall_progress
 
         def run():
             try:
@@ -592,6 +658,10 @@ class App:
                 )
                 success = result.get("success", 0)
                 skipped = result.get("skipped", 0)
+                done_total = success + skipped
+                self.root.after(0, lambda: self.search_stats_done_label.config(
+                    text=f"已下载{done_total}个视频"
+                ))
                 self.root.after(0, lambda: self.search_overall_label.config(
                     text=f"完成 — 新下载: {success}，跳过: {skipped}"
                 ))
@@ -679,6 +749,14 @@ class App:
         self.single_merge_progress.pack(side="left", fill="x", expand=True)
         self.single_merge_label = tk.Label(merge_row, text="", font=("Consolas", 9), fg="#888", width=15)
         self.single_merge_label.pack(side="left")
+
+        # 速度 + 已下载流量
+        speed_row = ttk.Frame(progress_frame)
+        speed_row.pack(fill="x", pady=(3, 0))
+        self.single_speed_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="w", fg="#1976D2")
+        self.single_speed_label.pack(side="left")
+        self.single_traffic_label = tk.Label(speed_row, text="", font=("Consolas", 9), anchor="e", fg="#555")
+        self.single_traffic_label.pack(side="right")
 
         # 日志（折叠在进度区下方，默认收起）
         self._single_log_visible = False
@@ -943,6 +1021,14 @@ class App:
             if current <= 1:
                 self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
+                self.root.after(0, lambda: self.single_speed_label.config(text="速度: --"))
+                self.root.after(0, lambda: self.single_traffic_label.config(text="流量: 0 B"))
+
+        def on_speed(global_speed_bps, total_bytes):
+            self.root.after(0, lambda s=global_speed_bps, t=total_bytes: [
+                self.single_speed_label.config(text=f"速度: {self._format_speed(s)}"),
+                self.single_traffic_label.config(text=f"流量: {self._format_bytes(t)}"),
+            ])
 
         try:
             self.crawler = CrawlerCore(
@@ -954,6 +1040,7 @@ class App:
                     self.single_merge_progress.configure(value=p),
                     self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
                 ]),
+                speed_callback=on_speed,
             )
         except Exception as e:
             self._log_to_single_ui(f"创建 CrawlerCore 失败: {e}")
@@ -1017,6 +1104,14 @@ class App:
             if current <= 1:
                 self.root.after(0, lambda: self.single_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.single_merge_label.config(text="切片下载中..."))
+                self.root.after(0, lambda: self.single_speed_label.config(text="速度: --"))
+                self.root.after(0, lambda: self.single_traffic_label.config(text="流量: 0 B"))
+
+        def on_speed(global_speed_bps, total_bytes):
+            self.root.after(0, lambda s=global_speed_bps, t=total_bytes: [
+                self.single_speed_label.config(text=f"速度: {self._format_speed(s)}"),
+                self.single_traffic_label.config(text=f"流量: {self._format_bytes(t)}"),
+            ])
 
         self.crawler = CrawlerCore(
             self.config,
@@ -1027,6 +1122,7 @@ class App:
                 self.single_merge_progress.configure(value=p),
                 self.single_merge_label.config(text=f"{p}%{f' {s}' if s else ''}")
             ]),
+            speed_callback=on_speed,
         )
 
         def run():
@@ -1333,7 +1429,6 @@ class App:
         self.root.update()
 
         try:
-            import subprocess
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r", str(get_app_dir() / "requirements.txt")],
                 capture_output=True, text=True
@@ -1453,8 +1548,6 @@ class App:
             "countdown": int     # 秒数
         }
         """
-        import threading
-
         result = {"value": opts.get("default", opts["choices"][0][0])}
         ready = threading.Event()
 
@@ -1627,25 +1720,33 @@ class App:
             if current <= 1:
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text="切片下载中..."))
+                self.root.after(0, lambda: self.search_speed_label.config(text="速度: --"))
+                self.root.after(0, lambda: self.search_traffic_label.config(text="流量: 0 B"))
 
-        # 搜索统计回调：预扫描完成后更新状态栏
+        def on_speed(global_speed_bps, total_bytes):
+            self.root.after(0, lambda s=global_speed_bps, t=total_bytes: [
+                self.search_speed_label.config(text=f"速度: {self._format_speed(s)}"),
+                self.search_traffic_label.config(text=f"流量: {self._format_bytes(t)}"),
+            ])
+
+        # 搜索统计回调：预扫描完成后更新状态栏 + 右侧统计标签
         def on_search_stats(stats: dict):
             total = stats["total"]
             downloaded = stats["downloaded"]
             pending = stats["pending"]
-            self.root.after(0, lambda: self.search_overall_label.config(
-                text="总计 {} 个视频（已下载 {}/待下载 {}/{})".format(total, downloaded, pending, total)
-            ))
+            label_text = "总计 {} 个视频（已下载 {}/待下载 {}/{})".format(total, downloaded, pending, total)
+            found_text = "已搜索{}个视频".format(total)
+            self.root.after(0, lambda l=label_text, f=found_text: [
+                self.search_overall_label.config(text=l),
+                self.search_stats_found_label.config(text=f),
+            ])
 
         # 搜索进度回调：每个视频处理完后实时更新
         def on_search_progress(done: int, to_process: int, total: int):
-            # done: 已处理数（已跳过+新下载），to_process: 需要处理的视频总数
-            new_done = sum(1 for vid in list(self.crawler._history.keys())
-                          if self.crawler._history[vid].get("download_time"))
-            # 用 crawler 内部计数更准确：new_success + skipped_so_far
-            self.root.after(0, lambda d=done, t=total: self.search_overall_label.config(
-                text=f"已处理 {d}/{t} 个视频"
-            ))
+            self.root.after(0, lambda d=done, t=total: [
+                self.search_overall_label.config(text=f"已处理 {d}/{t} 个视频"),
+                self.search_stats_done_label.config(text=f"已下载{d}个视频"),
+            ])
 
         self.crawler = CrawlerCore(
             self.config,
@@ -1657,14 +1758,26 @@ class App:
                 self.search_merge_progress.configure(value=p),
                 self.search_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
             ]),
+            speed_callback=on_speed,
         )
         # 注入搜索专用回调
         self.crawler.search_stats_callback = on_search_stats
         self.crawler.search_progress_callback = on_search_progress
 
+        # 搜索模式开始时清空右侧统计标签
+        self.root.after(0, lambda: [
+            self.search_stats_found_label.config(text=""),
+            self.search_stats_done_label.config(text=""),
+        ])
+
         def run():
             try:
                 self.root.after(0, lambda: self.search_overall_label.config(text="正在预扫描搜索结果..."))
+                # 清空右侧统计标签
+                self.root.after(0, lambda: [
+                    self.search_stats_found_label.config(text=""),
+                    self.search_stats_done_label.config(text="已下载0个视频"),
+                ])
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text=""))
                 result = self.crawler.crawl_search(
@@ -1717,6 +1830,15 @@ class App:
             if current <= 1:
                 self.root.after(0, lambda: self.crawl_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.crawl_merge_label.config(text="切片下载中..."))
+                # 重置速度/流量显示
+                self.root.after(0, lambda: self.crawl_speed_label.text="速度: --")
+                self.root.after(0, lambda: self.crawl_traffic_label.config(text="流量: 0 B"))
+
+        def on_speed(global_speed_bps, total_bytes):
+            self.root.after(0, lambda s=global_speed_bps, t=total_bytes: [
+                self.crawl_speed_label.config(text=f"速度: {self._format_speed(s)}"),
+                self.crawl_traffic_label.config(text=f"流量: {self._format_bytes(t)}"),
+            ])
 
         self.crawler = CrawlerCore(
             self.config,
@@ -1728,6 +1850,7 @@ class App:
                 self.crawl_merge_progress.configure(value=p),
                 self.crawl_merge_label.config(text=f"合并 MP4: {p}%{f'，速度: {s}' if s else ''}")
             ]),
+            speed_callback=on_speed,
         )
 
         def run():
@@ -1770,6 +1893,14 @@ class App:
                 self.root.after(0, lambda: self.crawl_overall_label.config(text="已停止"))
                 self.root.after(0, lambda: self.single_overall_label.config(text="已停止"))
                 self.root.after(0, lambda: self.search_overall_label.config(text="已停止"))
+                # 清空速度/流量显示（或保留最终值，这里选择清空表示已停）
+                for label in [self.crawl_speed_label, self.crawl_traffic_label,
+                              self.search_speed_label, self.search_traffic_label,
+                              self.single_speed_label, self.single_traffic_label]:
+                    try:
+                        self.root.after(0, lambda l=label: l.config(text=""))
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

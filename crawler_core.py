@@ -270,7 +270,7 @@ class TSDownloader:
     def __init__(self, segments: List[Tuple[str, Optional[bytes]]], output_file: Path,
                  headers: dict = None, threads: int = None, key_url: str = None,
                  progress_callback=None, stop_check=None, session: requests.Session = None,
-                 merge_progress_callback=None):
+                 merge_progress_callback=None, speed_callback=None):
         self.segments = segments
         self.output_file = output_file
         self.headers = headers or DEFAULT_HEADERS
@@ -279,10 +279,13 @@ class TSDownloader:
         self.key_url = key_url
         self.progress_callback = progress_callback
         self.merge_progress_callback = merge_progress_callback  # 合并进度回调 (percent, speed)
+        self.speed_callback = speed_callback  # 实时速度/流量回调 (speed_bytes_per_sec, total_bytes)
         self.stop_check = stop_check  # 可调用对象，返回 True 时停止
         self._key_cache: Optional[bytes] = None
         self._stopped = False
         self._failed_indices: List[int] = []  # 记录最终仍失败的切片索引
+        self.total_bytes_downloaded = 0  # 累计下载字节数（用于流量统计）
+        self._download_start_time: float = 0  # 下载开始时间戳
 
     def download(self):
         """并发下载并合并，支持失败重试
@@ -295,6 +298,10 @@ class TSDownloader:
 
         results = [None] * len(self.segments)
         failed_indices = set()
+
+        # 重置流量统计
+        self.total_bytes_downloaded = 0
+        self._download_start_time = time.time()
 
         try:
             # ------ 第一轮下载 ------
@@ -313,7 +320,12 @@ class TSDownloader:
 
                     idx = future_to_index[future]
                     try:
-                        results[idx] = future.result()
+                        data = future.result()
+                        results[idx] = data
+                        # 累计流量 + 计算速度
+                        if data is not None:
+                            seg_bytes = len(data)
+                            self.total_bytes_downloaded += seg_bytes
                     except Exception as e:
                         logger.error(f"切片 {idx+1} 失败: {e}")
                         failed_indices.add(idx)
@@ -321,6 +333,8 @@ class TSDownloader:
                     completed_count += 1
                     if self.progress_callback:
                         self.progress_callback(completed_count, len(self.segments))
+                    # 实时速度/流量回调（每完成一个切片触发）
+                    self._emit_speed()
 
                 if self._stopped:
                     logger.info("下载已中断")
@@ -349,10 +363,17 @@ class TSDownloader:
 
                         idx = future_to_index[future]
                         try:
-                            results[idx] = future.result()
+                            data = future.result()
+                            results[idx] = data
+                            if data is not None:
+                                seg_bytes = len(data)
+                                self.total_bytes_downloaded += seg_bytes
                         except Exception as e:
                             logger.error(f"切片 {idx+1} 重试失败: {e}")
                             still_failed.add(idx)
+
+                    # 重试阶段也更新速度
+                    self._emit_speed()
 
                     failed_indices = still_failed
 
@@ -421,6 +442,17 @@ class TSDownloader:
                 logger.error(f"切片 {idx+1} 解密失败: {e}")
 
         return data
+
+    def _emit_speed(self):
+        """计算并回调当前下载速度和累计流量"""
+        if not self.speed_callback:
+            return
+        try:
+            elapsed = time.time() - self._download_start_time
+            speed = self.total_bytes_downloaded / max(elapsed, 0.001)
+            self.speed_callback(speed, self.total_bytes_downloaded)
+        except Exception:
+            pass
 
     def _convert_to_mp4(self, ts_file: Path) -> bool:
         """用 ffmpeg 转换为 MP4（异步读取进度）"""
@@ -518,17 +550,23 @@ class CrawlerCore:
 
     def __init__(self, config: dict, log_callback=None, progress_callback=None,
                  info_callback=None, confirm_callback=None, base_url: str = None,
-                 merge_progress_callback=None):
+                 merge_progress_callback=None, speed_callback=None):
         self.config = config
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         self.merge_progress_callback = merge_progress_callback
+        self.speed_callback = speed_callback  # 全局速度/流量回调 (speed_bps, total_bytes)
         self.info_callback = info_callback
         self.confirm_callback = confirm_callback  # 确认弹窗回调
+        self.overall_progress_callback = None  # 整体进度回调 (done, total)，由外部注入
         self._stop_flag = False
         self.base_url = (base_url or config.get("site", "https://ml0987.xyz")).rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({**DEFAULT_HEADERS, "Referer": f"{self.base_url}/"})
+
+        # 全局流量统计（跨所有视频累计）
+        self._session_total_bytes = 0
+        self._session_start_time: float = 0
 
         # SOCKS5 代理配置（纯 Python 实现，无需 PySocks）
         if config.get("proxy_enabled"):
@@ -678,9 +716,16 @@ class CrawlerCore:
             video_id: 视频ID（用于防重复）
             upload_date: 上传日期 YYYY-MM-DD（用于分类存储）
             output_dir: 输出根目录
+
+        Returns:
+            bool 是否成功
         """
         if self._stop_flag:
             return False
+
+        # 首次下载时初始化全局计时
+        if self._session_start_time == 0:
+            self._session_start_time = time.time()
 
         # 防重复检查
         vid = video_id or self._extract_video_id(url)
@@ -735,6 +780,20 @@ class CrawlerCore:
         self._log(f"开始下载: {title} ({len(parser.segments)} 个切片)")
         if upload_date:
             self._log(f"  上传日期: {upload_date}")
+
+        # 构造速度回调桥：TSDownloader 的单视频速度 → CrawlerCore 全局速度
+        def _on_ts_speed(speed_bps: float, ts_bytes: int):
+            self._session_total_bytes += ts_bytes - getattr(self, '_last_ts_bytes', 0)
+            self._last_ts_bytes = ts_bytes
+            # 回调外部（全局速度 + 全局累计流量）
+            if self.speed_callback:
+                try:
+                    elapsed = time.time() - self._session_start_time
+                    global_speed = self._session_total_bytes / max(elapsed, 0.001)
+                    self.speed_callback(global_speed, self._session_total_bytes)
+                except Exception:
+                    pass
+
         downloader = TSDownloader(
             parser.segments,
             mp4_file,
@@ -743,9 +802,13 @@ class CrawlerCore:
             stop_check=lambda: self._stop_flag,
             session=self.session,
             merge_progress_callback=self.merge_progress_callback,
+            speed_callback=_on_ts_speed,
         )
 
         success, failed_segs = downloader.download()
+
+        # 累加本次下载的字节数到全局统计
+        self._session_total_bytes += downloader.total_bytes_downloaded
 
         if success:
             if failed_segs:
@@ -1113,6 +1176,12 @@ class CrawlerCore:
                         self._log(f"  [{idx}/{len(video_list)}] 已下载过，跳过: {title}")
                         total_skipped += 1
                         author_skipped += 1
+                        # 更新整体进度
+                        if hasattr(self, 'overall_progress_callback') and self.overall_progress_callback:
+                            try:
+                                self.overall_progress_callback(total_success + total_skipped)
+                            except Exception:
+                                pass
                         continue
 
                     self._log(f"  [{idx}/{len(video_list)}] {title}")
@@ -1125,10 +1194,7 @@ class CrawlerCore:
 
                     # 构造作者专属输出目录: downloads/{日期}/{作者ID}/
                     output_root = Path(self.config.get("output_dir", "downloads"))
-                    if self.config.get("sort_by_upload_date", True):
-                        date_str = datetime.now().strftime("%Y-%m-%d")
-                    else:
-                        date_str = datetime.now().strftime("%Y-%m-%d")
+                    date_str = datetime.now().strftime("%Y-%m-%d")
                     author_output_dir = output_root / date_str / author_dir_name
 
                     try:
@@ -1146,6 +1212,13 @@ class CrawlerCore:
                     except Exception as e:
                         self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
                         failed_by_author[author_name].append((url, title, vid))
+
+                    # 更新整体进度
+                    if hasattr(self, 'overall_progress_callback') and self.overall_progress_callback:
+                        try:
+                            self.overall_progress_callback(total_success + total_skipped)
+                        except Exception:
+                            pass
 
                     time.sleep(2)
 
