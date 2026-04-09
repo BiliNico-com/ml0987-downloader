@@ -373,9 +373,11 @@ class App:
         self.search_author_frame = ttk.Frame(control_frame)
         # 不 pack，由 _toggle_search_mode 控制显示
 
-        ttk.Button(self.search_author_frame, text="🔍 搜索作者", command=self._search_authors).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="🔍 搜索作者", command=lambda: self._search_authors(append=False)).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="➕ 追加", command=lambda: self._search_authors(append=True)).pack(side="left", padx=3)
         ttk.Button(self.search_author_frame, text="全选", command=self._select_all_authors).pack(side="left", padx=3)
         ttk.Button(self.search_author_frame, text="取消全选", command=self._deselect_all_authors).pack(side="left", padx=3)
+        ttk.Button(self.search_author_frame, text="🗑 清空队列", command=self._clear_author_queue).pack(side="left", padx=3)
         ttk.Label(self.search_author_frame, text="作者页码:").pack(side="left", padx=(15, 0))
         self.search_author_page_start_var = tk.IntVar(value=1)
         ttk.Spinbox(self.search_author_frame, from_=1, to=100, textvariable=self.search_author_page_start_var, width=5).pack(side="left", padx=2)
@@ -386,13 +388,13 @@ class App:
         ttk.Button(self.search_author_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
 
         # 作者列表区域（搜作者模式时显示，在封面和进度之间）
-        self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="搜索到的作者（勾选要下载的）", padding=5)
+        self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="📋 作者队列（勾选要下载的）", padding=5)
         # 不 pack，由 _toggle_search_mode 控制显示
         self.search_author_listbox_frame = ttk.Frame(self.search_author_list_frame)
         self.search_author_listbox_frame.pack(fill="x")
 
         # 用 Canvas + Scrollbar + Checkbutton 实现可勾选列表（固定高度，不抢占空间）
-        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=80)
+        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=120)
         self._author_scrollbar = ttk.Scrollbar(self.search_author_listbox_frame, orient="vertical", command=self._author_canvas.yview)
         self._author_inner_frame = ttk.Frame(self._author_canvas)
         self._author_inner_frame.bind("<Configure>", lambda e: self._author_canvas.configure(scrollregion=self._author_canvas.bbox("all")))
@@ -491,10 +493,14 @@ class App:
         else:
             self._start_search()
 
-    def _search_authors(self):
-        """搜索作者，在列表中展示结果（含每个作者的总页数）"""
-        keyword = self.search_keyword_var.get().strip()
-        if not keyword:
+    def _search_authors(self, append: bool = False):
+        """搜索作者，支持多关键词（逗号/空格/换行分隔），结果可追加到队列
+        
+        Args:
+            append: True = 追加到现有列表，False = 清空后重新搜索
+        """
+        raw_keywords = self.search_keyword_var.get().strip()
+        if not raw_keywords:
             messagebox.showwarning("警告", "请输入搜索关键词")
             return
 
@@ -502,12 +508,19 @@ class App:
             messagebox.showwarning("警告", "请先选择站点")
             return
 
-        # 清空旧列表
-        for widget in self._author_inner_frame.winfo_children():
-            widget.destroy()
-        self._author_check_vars.clear()
+        # 支持多关键词：逗号、中文逗号、换行、空格分隔
+        import re
+        keywords = [k.strip() for k in re.split(r'[,，\n\s]+', raw_keywords) if k.strip()]
 
-        self.search_overall_label.config(text="正在搜索作者...")
+        if not append:
+            # 非追加模式：清空旧列表
+            for widget in self._author_inner_frame.winfo_children():
+                widget.destroy()
+            self._author_check_vars.clear()
+
+        existing_count = len(self._author_check_vars)
+        mode_text = "追加" if append else "搜索"
+        self.search_overall_label.config(text=f"正在{mode_text}搜索 {len(keywords)} 个关键词...")
 
         def run():
             try:
@@ -516,12 +529,27 @@ class App:
                     log_callback=self._log_to_search_ui,
                     base_url=self.search_site_var.get(),
                 )
-                authors = crawler.search_authors(keyword)
+                all_new_authors = []
+                # 多关键词：逐个搜索并合并结果
+                for kw in keywords:
+                    if append:
+                        self.root.after(0, lambda k=kw: self.search_overall_label.config(
+                            text=f"追加搜索中... 关键词: {k}"
+                        ))
+                    found = crawler.search_authors(kw)
+                    # 去重（按 param 去重，防止不同关键词搜到同一作者）
+                    existing_params = {a["param"] for _, a in self._author_check_vars}
+                    for a in found:
+                        if a.get("param", "") not in existing_params:
+                            all_new_authors.append(a)
+                            existing_params.add(a.get("param", ""))
 
-                # 为每个作者获取总页数
+                authors = all_new_authors
+
+                # 为每个新作者获取总页数
                 if authors:
                     self.root.after(0, lambda: self.search_overall_label.config(
-                        text=f"找到 {len(authors)} 个作者，正在获取页数信息..."
+                        text=f"找到 {len(authors)} 个新作者，正在获取页数信息..."
                     ))
                     for author in authors:
                         try:
@@ -535,24 +563,34 @@ class App:
 
             def show_results():
                 if not authors:
-                    self.search_overall_label.config(text=f"未找到匹配的作者: {keyword}")
-                    self.search_stats_found_label.config(text="")
-                    self.search_stats_done_label.config(text="")
+                    mode_text = "追加" if append else "搜索"
+                    self.search_overall_label.config(
+                        text=f"{mode_text}: 未找到新作者"
+                    )
                     return
 
                 # 找出最大页数，用于设置 Spinbox 的上限
                 max_pages = max(a.get("page_count", 1) for a in authors)
+                old_end_val = self.search_author_page_end_var.get()
                 self.search_author_page_start_var.set(1)
-                self.search_author_page_end_var.set(max_pages)
+                self.search_author_page_end_var.set(max(old_end_val, max_pages))
+
+                total_in_queue = len(self._author_check_vars) + len(authors)
+                new_videos = sum(a.get("count", 0) for a in authors)
+                mode_text = "追加了" if append else "搜索到"
 
                 self.search_overall_label.config(
-                    text=f"找到 {len(authors)} 个作者（最多 {max_pages} 页）"
+                    text=f"作者队列: 共 {total_in_queue} 人（本次{mode_text} {len(authors)} 人）"
                 )
 
-                # 计算选中作者的总视频数并显示
-                total_videos = sum(a.get("count", 0) for a in authors)
-                self.search_stats_found_label.config(text=f"已搜索{total_videos}个视频")
-                self.search_stats_done_label.config(text="已下载0个视频")
+                # 累加统计到已有标签
+                old_found_text = self.search_stats_found_label.cget("text")
+                # 解析已有视频数
+                import re as _re
+                old_match = _re.search(r'(\d+)', old_found_text)
+                old_video_count = int(old_match.group(1)) if old_match else 0
+                total_videos = old_video_count + new_videos
+                self.search_stats_found_label.config(text=f"队列共{total_videos}个视频")
 
                 for author in authors:
                     var = tk.BooleanVar(value=True)
@@ -578,6 +616,22 @@ class App:
         """取消全选"""
         for var, _ in self._author_check_vars:
             var.set(False)
+
+    def _clear_author_queue(self):
+        """清空作者队列"""
+        if not self._author_check_vars:
+            self.search_overall_label.config(text="队列已空")
+            return
+
+        count = len(self._author_check_vars)
+        if not messagebox.askyesno("确认清空", f"确认清空 {count} 个作者？"):
+            return
+        for widget in self._author_inner_frame.winfo_children():
+            widget.destroy()
+        self._author_check_vars.clear()
+        self.search_overall_label.config(text="作者队列为空")
+        self.search_stats_found_label.config(text="")
+        self.search_stats_done_label.config(text="")
 
     def _start_author_crawl(self):
         """下载选中作者的视频"""
@@ -646,9 +700,20 @@ class App:
             ))
         self.crawler.overall_progress_callback = on_overall_progress
 
+        # 作者级进度回调：显示当前第几个作者
+        def on_author_progress(current: int, total: int):
+            author_name = selected[current - 1].get("name", "?") if current <= len(selected) else "?"
+            self.root.after(0, lambda c=current, t=total, n=author_name: [
+                self.search_overall_label.config(text=f"📂 作者 {c}/{t}: {n}"),
+            ])
+        self.crawler.author_progress_callback = on_author_progress
+
         def run():
             try:
-                self.root.after(0, lambda: self.search_overall_label.config(text="正在下载作者视频..."))
+                total_authors = len(selected)
+                self.root.after(0, lambda: self.search_overall_label.config(
+                    text=f"准备下载 {total_authors} 个作者的视频..."
+                ))
                 self.root.after(0, lambda: self.search_merge_progress.configure(value=0))
                 self.root.after(0, lambda: self.search_merge_label.config(text=""))
                 result = self.crawler.crawl_authors(
@@ -888,16 +953,25 @@ class App:
             self.single_status_label.config(text="当前页没有视频")
             return
 
-        # 统计已下载个数
+        # 统计已下载个数（同时检查活跃记录和归档ID集合）
         downloaded = 0
         try:
-            history_path = Path(self.config.get("output_dir", APP_DIR / "downloads")) / "download_history.json"
-            if history_path.exists():
-                import json as _json
-                history = _json.loads(history_path.read_text(encoding="utf-8"))
-                for v in videos:
-                    if v.get("id") in history:
-                        downloaded += 1
+            output_dir = Path(self.config.get("output_dir", APP_DIR / "downloads"))
+            # 检查活跃历史
+            hist_path = output_dir / "download_history.json"
+            history = {}
+            if hist_path.exists():
+                history = json.loads(hist_path.read_text(encoding="utf-8"))
+            # 检查归档ID集合
+            archive_path = output_dir / "download_history_ids.json"
+            archive_ids = set()
+            if archive_path.exists():
+                archive_ids = set(json.loads(archive_path.read_text(encoding="utf-8")))
+            # 合并判断
+            for v in videos:
+                vid = v.get("id")
+                if vid and (vid in history or vid in archive_ids):
+                    downloaded += 1
         except Exception:
             pass
 
@@ -1882,6 +1956,11 @@ class App:
     def _stop_crawl(self):
         """停止任务"""
         if self.crawler:
+            # 刷新历史记录到磁盘（防止未写入的数据丢失）
+            try:
+                self.crawler.flush_history()
+            except Exception:
+                pass
             self.crawler.stop()
             # 不再在主线程 join，避免卡顿；线程设为 daemon 会自动清理
             self.crawl_thread = None
@@ -1907,14 +1986,15 @@ class App:
     # ==================== 代理测试 ====================
 
     def _test_proxy(self):
-        """测试代理连接是否可用（使用本地 socks.py，无需安装）"""
+        """测试网络连接（根据勾选状态决定是否走代理）"""
         host = self.proxy_host_var.get().strip()
         port = self.proxy_port_var.get().strip()
         user = self.proxy_user_var.get().strip()
         passwd = self.proxy_pass_var.get().strip()
+        use_proxy = self.proxy_enabled_var.get()
 
-        if not host or not port:
-            messagebox.showwarning("提示", "请填写代理主机和端口")
+        if (not host or not port) and use_proxy:
+            messagebox.showwarning("提示", "勾选了启用代理，请填写主机和端口")
             return
 
         # 弹出结果窗口
@@ -1936,23 +2016,28 @@ class App:
                 result_text.insert(tk.END, text + "\n")
             result_text.see(tk.END)
 
-        proxy_label = f"socks5h://{host}:{port}"
-        append(f"代理: {proxy_label}\n")
+        if use_proxy:
+            proxy_label = f"socks5h://{host}:{port}"
+            append(f"代理: {proxy_label}\n")
+        else:
+            append("模式: 直连（未启用代理）\n")
 
         def run_test():
             import requests as req
-            # 本地 socks.py 提供支持，无需 pip install
-            if user and passwd:
-                proxy_url = f"socks5h://{user}:{passwd}@{host}:{port}"
+            # 根据勾选状态决定是否使用代理
+            if use_proxy:
+                if user and passwd:
+                    proxy_url = f"socks5h://{user}:{passwd}@{host}:{port}"
+                else:
+                    proxy_url = f"socks5h://{host}:{port}"
+                proxies = {"http": proxy_url, "https": proxy_url}
             else:
-                proxy_url = f"socks5h://{host}:{port}"
-            proxies = {"http": proxy_url, "https": proxy_url}
+                proxies = None  # 直连，不经过代理
 
             targets = [
                 ("Google", "https://www.google.com"),
                 ("YouTube", "https://www.youtube.com"),
                 ("Twitter/X", "https://x.com"),
-                ("ipinfo.io (出口IP)", "https://ipinfo.io/json"),
             ]
 
             for name, url in targets:
@@ -1960,22 +2045,12 @@ class App:
                 try:
                     resp = req.get(url, proxies=proxies, timeout=10, allow_redirects=False)
                     status = resp.status_code
-                    if name == "ipinfo.io (出口IP)":
-                        self.root.after(0, lambda s=status: append(f"  ✓ {name} — HTTP {s}", "green"))
-                        # 显示IP信息
-                        try:
-                            body = resp.json()
-                            ip = body.get("ip", "?")
-                            country = body.get("country", "?")
-                            self.root.after(0, lambda i=ip, c=country: append(f"    出口IP: {i}，地区: {c}", "green"))
-                        except Exception:
-                            pass
-                    elif 200 <= status < 400:
-                        self.root.after(0, lambda n=name, s=status: append(f"  ✓ {n} — HTTP {s}", "green"))
+                    if 200 <= status < 400:
+                        self.root.after(0, lambda n=name, s=status: append(f"  ✓ {name} — HTTP {s}", "green"))
                     else:
-                        self.root.after(0, lambda n=name, s=status: append(f"  ✗ {n} — HTTP {s}", "orange"))
+                        self.root.after(0, lambda n=name, s=status: append(f"  ✗ {name} — HTTP {s}", "orange"))
                 except Exception as e:
-                    self.root.after(0, lambda n=name, err=str(e)[:100]: append(f"  ✗ {n} — {err}", "red"))
+                    self.root.after(0, lambda n=name, err=str(e)[:100]: append(f"  ✗ {name} — {err}", "red"))
 
             self.root.after(0, lambda: append("\n── 测试完成 ──"))
 
@@ -1985,6 +2060,15 @@ class App:
 def main():
     root = tk.Tk()
     app = App(root)
+    # 程序退出前刷新历史记录
+    def on_closing():
+        if app.crawler:
+            try:
+                app.crawler.flush_history()
+            except Exception:
+                pass
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
 
 if __name__ == "__main__":

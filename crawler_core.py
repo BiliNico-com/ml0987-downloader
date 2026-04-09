@@ -12,6 +12,7 @@ import re
 import json
 import sys
 import time
+import threading
 import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -547,6 +548,9 @@ class CrawlerCore:
     """爬虫核心类（纯 requests，无浏览器依赖）"""
 
     HISTORY_FILE = "download_history.json"
+    ARCHIVE_ID_FILE = "download_history_ids.json"  # 归档的 video_id 集合（纯ID，极小）
+    ACTIVE_HISTORY_LIMIT = 500  # 活跃历史超过此条数时自动归档旧记录
+    AUTO_SAVE_INTERVAL = 10     # 每标记 N 条后自动持久化一次
 
     def __init__(self, config: dict, log_callback=None, progress_callback=None,
                  info_callback=None, confirm_callback=None, base_url: str = None,
@@ -580,13 +584,22 @@ class CrawlerCore:
             else:
                 self._log("代理已启用但未配置主机/端口", "warn")
 
-        # 已下载记录（防重复）
-        self._history = self._load_history()
+        # 已下载记录（防重复）—— 双层架构
+        self._history = self._load_history()           # 活跃记录（完整信息）
+        self._archive_ids: set = self._load_archive_ids()  # 归档 ID 集合（仅ID，极轻量）
+        self._dirty = False                             # 脏标记：是否有未保存的变更
+        self._pending_count = 0                         # 待写入计数
+        self._lock = threading.Lock()                   # 线程安全锁
 
     def _get_history_path(self) -> Path:
         """获取下载记录文件路径"""
         output_dir = Path(self.config.get("output_dir", "downloads"))
         return output_dir / self.HISTORY_FILE
+
+    def _get_archive_path(self) -> Path:
+        """获取归档 ID 文件路径（仅存 video_id 集合，文件极小）"""
+        output_dir = Path(self.config.get("output_dir", "downloads"))
+        return output_dir / self.ARCHIVE_ID_FILE
 
     def _load_history(self) -> Dict[str, dict]:
         """加载已下载记录 {video_id: {title, date, url, ...}}"""
@@ -600,25 +613,104 @@ class CrawlerCore:
                 pass
         return {}
 
+    def _load_archive_ids(self) -> set:
+        """加载归档 ID 集合（轻量级，只存ID字符串列表）"""
+        path = self._get_archive_path()
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(data, list):
+                    return set(data)
+            except Exception:
+                pass
+        return set()
+
     def _save_history(self):
-        """保存已下载记录"""
-        path = self._get_history_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self._history, ensure_ascii=False, indent=2), encoding='utf-8')
+        """保存已下载记录（压缩格式，无缩进）"""
+        with self._lock:
+            path = self._get_history_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 不用 indent=2，压缩写入，体积小 60%+
+            path.write_text(json.dumps(self._history, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
+            # 同时保存当前活跃记录的 key 到归档文件的备份（方便以后迁移）
+            self._dirty = False
+            self._pending_count = 0
+
+    def _save_archive_ids(self):
+        """保存归档 ID 集合到独立的小文件"""
+        with self._lock:
+            path = self._get_archive_path()
+            if self._archive_ids:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # 列表形式存储，按排序写保证稳定
+                path.write_text(
+                    json.dumps(sorted(self._archive_ids), ensure_ascii=False),
+                    encoding='utf-8'
+                )
 
     def _is_downloaded(self, video_id: str) -> bool:
-        """检查视频是否已下载过"""
-        return video_id in self._history
+        """检查视频是否已下载过（先查活跃记录，再查归档集合）"""
+        return video_id in self._history or video_id in self._archive_ids
 
     def _mark_downloaded(self, video_id: str, title: str, url: str, upload_date: str = None):
-        """标记视频已下载"""
-        self._history[video_id] = {
-            "title": title,
-            "url": url,
-            "upload_date": upload_date,
-            "download_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        self._save_history()
+        """标记视频已下载 + 延迟写入优化"""
+        with self._lock:
+            self._history[video_id] = {
+                "title": title,
+                "url": url,
+                "upload_date": upload_date,
+                "download_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._dirty = True
+            self._pending_count += 1
+
+            # 延迟写入：攒够 N 条或超过阈值时才真正写磁盘
+            needs_save = (self._pending_count >= self.AUTO_SAVE_INTERVAL)
+
+            # 活跃记录超限 → 自动归档旧条目
+            needs_archive = (len(self._history) > self.ACTIVE_HISTORY_LIMIT)
+
+        if needs_archive:
+            self._archive_old_records()
+
+        if needs_save:
+            self._save_history()
+
+    def _archive_old_records(self):
+        """将超出限制的旧记录归档：保留最新 N 条活跃，其余只保留ID到归档集"""
+        with self._lock:
+            if len(self._history) <= self.ACTIVE_HISTORY_LIMIT:
+                return
+
+            # 按 download_time 排序，保留最新的 ACTIVE_LIMIT 条
+            items = list(self._history.items())
+            # 没有时间戳的排最前面（会被归档）
+            def sort_key(item):
+                t = item[1].get("download_time", "")
+                return t or "0000-00-00 00:00:00"
+
+            items.sort(key=sort_key, reverse=True)
+
+            keep = items[:self.ACTIVE_HISTORY_LIMIT]
+            to_archive = items[self.ACTIVE_HISTORY_LIMIT:]
+
+            # 归档：把旧条目的 ID 加入 archive_ids 集合
+            for vid, _info in to_archive:
+                self._archive_ids.add(vid)
+
+            # 缩减活跃历史
+            self._history = dict(keep)
+
+            self._log(f"已归档 {len(to_archive)} 条历史记录（活跃: {len(self._history)}，归档总计: {len(self._archive_ids)}）")
+
+            # 持久化两个文件
+            self._save_history()
+            self._save_archive_ids()
+
+    def flush_history(self):
+        """手动刷新：将内存中未保存的变更立即写入磁盘（程序退出时调用）"""
+        if self._dirty:
+            self._save_history()
 
     def _log(self, message: str, level: str = "info"):
         """日志回调"""
@@ -844,61 +936,67 @@ class CrawlerCore:
             url_pattern = LIST_TYPES["list"]
 
         self._log(f"列表类型: {list_type}，页码范围: {page_start}-{page_end}")
-        self._log(f"已下载记录: {len(self._history)} 个视频")
 
+        # ===== 预扫描阶段：收集所有视频，输出摘要 =====
+        all_videos = []  # [(page, video_dict), ...]
         for page in range(page_start, page_end + 1):
-            if self._stop_flag:
-                break
-
-            self._log(f"正在爬取第 {page} 页...")
-
             list_url = f"{self.base_url}/{url_pattern.format(page=page)}"
             video_list = self._extract_video_urls(list_url)
             if not video_list:
-                self._log(f"第 {page} 页未发现视频", "warn")
+                continue
+            for v in video_list:
+                all_videos.append((page, v))
+
+        all_count = len(all_videos)
+        already_downloaded = sum(1 for _, v in all_videos if v.get("id") and self._is_downloaded(v["id"]))
+        pending_count = all_count - already_downloaded
+
+        self._log(f"预检完成: 共 {all_count} 个视频，已下载 {already_downloaded}，待下载 {pending_count}")
+
+        # ===== 正式下载阶段 =====
+        processed = 0
+
+        for page_idx, (page, video) in enumerate(all_videos):
+            if self._stop_flag:
+                break
+
+            url = video["url"]
+            vid = video.get("id")
+            title = video.get("title") or f"第{page}页_第{processed+1}个"
+            cover = video.get("cover") or ""
+            processed += 1
+
+            # 防重复检查（提前检查，避免不必要的请求）
+            if vid and self._is_downloaded(vid):
+                self._log(f"[{processed}/{all_count}] 已下载过，跳过: {title}")
+                total_skipped += 1
                 continue
 
-            self._log(f"发现 {len(video_list)} 个视频")
+            self._log(f"[{processed}/{all_count}] {title}")
+            self._log(f"  {url}")
 
-            for idx, video in enumerate(video_list, 1):
-                if self._stop_flag:
-                    break
-
-                url = video["url"]
-                vid = video.get("id")
-                title = video.get("title") or f"第{page}页_第{idx}个"
-                cover = video.get("cover") or ""
-
-                # 防重复检查（提前检查，避免不必要的请求）
-                if vid and self._is_downloaded(vid):
-                    self._log(f"[{idx}/{len(video_list)}] 已下载过，跳过: {title}")
-                    total_skipped += 1
-                    continue
-
-                self._log(f"[{idx}/{len(video_list)}] {title}")
-                self._log(f"  {url}")
-
-                # 通过 info_callback 传递封面信息给 UI
-                if hasattr(self, 'info_callback') and self.info_callback and cover:
-                    try:
-                        self.info_callback({"title": title, "cover": cover})
-                    except Exception:
-                        pass
-
+            # 通过 info_callback 传递封面信息给 UI
+            if hasattr(self, 'info_callback') and self.info_callback and cover:
                 try:
-                    ok = self.download_single(url, title, video_id=vid)
-                    if ok:
-                        # 判断是真正下载了还是跳过了
-                        if vid and self._history.get(vid, {}).get("download_time"):
-                            total_success += 1
-                        else:
-                            total_skipped += 1
-                except Exception as e:
-                    self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+                    self.info_callback({"title": title, "cover": cover})
+                except Exception:
+                    pass
 
-                time.sleep(2)
+            try:
+                ok = self.download_single(url, title, video_id=vid)
+                if ok:
+                    # 判断是真正下载了还是跳过了
+                    if vid and self._history.get(vid, {}).get("download_time"):
+                        total_success += 1
+                    else:
+                        total_skipped += 1
+            except Exception as e:
+                self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+
+            time.sleep(2)
 
         self._log(f"批量爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        self.flush_history()
         return {"success": total_success, "skipped": total_skipped}
 
     # ==================== 搜索爬取 ====================
@@ -998,6 +1096,7 @@ class CrawlerCore:
             time.sleep(2)
 
         self._log(f"搜索爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        self.flush_history()
         return {"success": total_success, "skipped": total_skipped}
 
     def _extract_search_results(self, search_url: str) -> List[dict]:
@@ -1120,15 +1219,25 @@ class CrawlerCore:
         下载的视频会放到 downloads/{日期}/{作者ID}/ 目录下方便归档
         每个作者完成后会弹出提示（若有失败视频则询问是否重试），
         全部作者完成后询问是否继续下一作者，支持 10 秒倒计时自动确认。
+        
+        支持 author_progress_callback(current, total) 回调，用于显示当前第几个作者。
         """
         total_success = 0
         total_skipped = 0
+        author_count = len(authors)
         # 按作者记录失败视频: { author_name: [(url, title, vid), ...] }
         failed_by_author: Dict[str, List[tuple]] = {}
 
-        for author_info in authors:
+        for idx, author_info in enumerate(authors, 1):
             if self._stop_flag:
                 break
+
+            # 通知当前处理第几个作者
+            if hasattr(self, 'author_progress_callback') and self.author_progress_callback:
+                try:
+                    self.author_progress_callback(idx, author_count)
+                except Exception:
+                    pass
 
             author_name = author_info.get("name", "未知作者")
             author_param = author_info.get("param", author_name)
@@ -1141,13 +1250,12 @@ class CrawlerCore:
             # 作者子目录名：使用作者 param（ID），清理非法字符
             author_dir_name = sanitize_filename(author_param)
 
+            # ===== 预扫描阶段：收集该作者所有页的视频 =====
+            author_all_videos = []
             for page in range(page_start, page_end + 1):
                 if self._stop_flag:
                     break
 
-                self._log(f"  第 {page} 页...")
-
-                # 作者分页 URL 格式: user-{page}.htm?author=xxx
                 if page == 1:
                     list_url = author_url
                 else:
@@ -1157,70 +1265,93 @@ class CrawlerCore:
                     list_url = f"{self.base_url}/user-{page}.htm?{urlencode(params, doseq=True)}"
 
                 video_list = self._extract_video_urls(list_url)
-                if not video_list:
-                    self._log(f"  第 {page} 页未发现视频", "warn")
-                    continue
+                for v in video_list:
+                    author_all_videos.append(v)
 
-                self._log(f"  发现 {len(video_list)} 个视频")
+            author_total = len(author_all_videos)
+            author_already = sum(1 for v in author_all_videos if v.get("id") and self._is_downloaded(v["id"]))
+            author_pending = author_total - author_already
 
-                for idx, video in enumerate(video_list, 1):
-                    if self._stop_flag:
+            self._log(f"  预检: 共 {author_total} 个视频，已下载 {author_already}，待下载 {author_pending}")
+
+            if author_total == 0:
+                self._log(f"  作者「{author_name}」没有发现视频，跳过")
+                # ===== 作者完成（空）=====
+                if self.confirm_callback:
+                    msg = f"作者「{author_name}」未发现视频"
+                    choice = self.confirm_callback({
+                        "title": "作者为空",
+                        "message": msg,
+                        "choices": [("yes", "继续下一作者"), ("no", "停止")],
+                        "default": "yes",
+                        "countdown": 5,
+                    })
+                    if choice != "yes":
                         break
+                continue
 
-                    url = video["url"]
-                    vid = video.get("id")
-                    title = video.get("title") or f"{author_name}_第{page}页_第{idx}个"
-                    cover = video.get("cover") or ""
+            # ===== 正式下载阶段 =====
+            processed = 0
 
-                    if vid and self._is_downloaded(vid):
-                        self._log(f"  [{idx}/{len(video_list)}] 已下载过，跳过: {title}")
-                        total_skipped += 1
-                        author_skipped += 1
-                        # 更新整体进度
-                        if hasattr(self, 'overall_progress_callback') and self.overall_progress_callback:
-                            try:
-                                self.overall_progress_callback(total_success + total_skipped)
-                            except Exception:
-                                pass
-                        continue
+            for video in author_all_videos:
+                if self._stop_flag:
+                    break
 
-                    self._log(f"  [{idx}/{len(video_list)}] {title}")
+                url = video["url"]
+                vid = video.get("id")
+                title = video.get("title") or f"{author_name}_第{processed+1}个"
+                cover = video.get("cover") or ""
+                processed += 1
 
-                    if hasattr(self, 'info_callback') and self.info_callback and cover:
-                        try:
-                            self.info_callback({"title": title, "cover": cover})
-                        except Exception:
-                            pass
-
-                    # 构造作者专属输出目录: downloads/{日期}/{作者ID}/
-                    output_root = Path(self.config.get("output_dir", "downloads"))
-                    date_str = datetime.now().strftime("%Y-%m-%d")
-                    author_output_dir = output_root / date_str / author_dir_name
-
-                    try:
-                        ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
-                        if ok:
-                            if vid and self._history.get(vid, {}).get("download_time"):
-                                total_success += 1
-                                author_success += 1
-                            else:
-                                total_skipped += 1
-                                author_skipped += 1
-                        else:
-                            # 下载失败（含切片缺失），记录到失败列表
-                            failed_by_author[author_name].append((url, title, vid))
-                    except Exception as e:
-                        self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
-                        failed_by_author[author_name].append((url, title, vid))
-
+                if vid and self._is_downloaded(vid):
+                    self._log(f"  [{processed}/{author_total}] 已下载过，跳过: {title}")
+                    total_skipped += 1
+                    author_skipped += 1
                     # 更新整体进度
                     if hasattr(self, 'overall_progress_callback') and self.overall_progress_callback:
                         try:
                             self.overall_progress_callback(total_success + total_skipped)
                         except Exception:
                             pass
+                    continue
 
-                    time.sleep(2)
+                self._log(f"  [{processed}/{author_total}] {title}")
+
+                if hasattr(self, 'info_callback') and self.info_callback and cover:
+                    try:
+                        self.info_callback({"title": title, "cover": cover})
+                    except Exception:
+                        pass
+
+                # 构造作者专属输出目录: downloads/{日期}/{作者ID}/
+                output_root = Path(self.config.get("output_dir", "downloads"))
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                author_output_dir = output_root / date_str / author_dir_name
+
+                try:
+                    ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
+                    if ok:
+                        if vid and self._history.get(vid, {}).get("download_time"):
+                            total_success += 1
+                            author_success += 1
+                        else:
+                            total_skipped += 1
+                            author_skipped += 1
+                    else:
+                        # 下载失败（含切片缺失），记录到失败列表
+                        failed_by_author[author_name].append((url, title, vid))
+                except Exception as e:
+                    self._log(f"下载过程出错，跳过继续: {title} ({e})", "error")
+                    failed_by_author[author_name].append((url, title, vid))
+
+                # 更新整体进度
+                if hasattr(self, 'overall_progress_callback') and self.overall_progress_callback:
+                    try:
+                        self.overall_progress_callback(total_success + total_skipped)
+                    except Exception:
+                        pass
+
+                time.sleep(2)
 
             # ===== 作者下载完毕，弹出提示 =====
             total_videos = author_success + author_skipped + len(failed_by_author[author_name])
@@ -1287,6 +1418,7 @@ class CrawlerCore:
                     break
 
         self._log(f"作者爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
+        self.flush_history()
         return {"success": total_success, "skipped": total_skipped}
 
     def _extract_video_urls(self, list_url: str) -> List[dict]:
