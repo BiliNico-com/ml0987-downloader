@@ -832,11 +832,27 @@ class CrawlerCore:
         if self._session_start_time == 0:
             self._session_start_time = time.time()
 
-        # 防重复检查
+        # 防重复检查：记录里有的，询问用户是否跳过还是重新下载
         vid = video_id or self._extract_video_id(url)
         if vid and self._is_downloaded(vid):
-            self._log(f"已下载过，跳过: {title or vid}", "warn")
-            return True  # 返回 True 表示已处理（跳过也算成功）
+            # 有确认回调时弹窗询问，没有则默认跳过（向后兼容单视频模式）
+            if self.confirm_callback and not self._stop_flag:
+                choice = self.confirm_callback({
+                    "title": "该视频已在下载记录中",
+                    "message": f"「{title or vid}」已在历史记录中\n\n可能已被移动或删除。\n是否跳过？",
+                    "choices": [("skip", "是，跳过"), ("redownload", "否，重新下载")],
+                    "default": "skip",
+                    "countdown": 5,
+                })
+                if choice == "skip":
+                    self._log(f"已下载过，跳过: {title or vid}")
+                    return True
+                else:
+                    self._log(f"用户选择重新下载: {title or vid}")
+                    # 继续往下走，正常下载流程
+            else:
+                self._log(f"已下载过，跳过: {title or vid}", "warn")
+                return True
 
         # 提取 m3u8
         m3u8_url = self._extract_m3u8_from_html(url)
@@ -874,13 +890,6 @@ class CrawlerCore:
 
         date_dir = output_dir / date_str
         mp4_file = date_dir / f"{sanitize_filename(title)}.mp4"
-
-        # 文件已存在也视为成功
-        if mp4_file.exists():
-            self._log(f"文件已存在，跳过: {mp4_file.name}", "warn")
-            if vid:
-                self._mark_downloaded(vid, title, url, upload_date)
-            return True
 
         self._log(f"开始下载: {title} ({len(parser.segments)} 个切片)")
         if upload_date:
@@ -1282,27 +1291,8 @@ class CrawlerCore:
                     author_all_videos.append(v)
 
             author_total = len(author_all_videos)
-            # 预检：同时检查下载历史 + 磁盘文件（双重检查更准确）
-            output_root = Path(self.config.get("output_dir", "downloads"))
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            author_already = 0
-            for v in author_all_videos:
-                vid = v.get("id")
-                if vid and self._is_downloaded(vid):
-                    author_already += 1
-                    continue
-                # 补充检查磁盘文件是否已存在（处理历史记录丢失但文件还在的情况）
-                title = v.get("title") or f"视频_{vid}"
-                if self.config.get("title_with_author"):
-                    # 预检时无法确定作者名，用标题模糊匹配
-                    pass
-                mp4_name = f"{sanitize_filename(title)}.mp4"
-                # 检查可能的目录位置
-                for check_dir in [output_root / date_str / sanitize_filename(author_param),
-                                  output_root / date_str]:
-                    if (check_dir / mp4_name).exists():
-                        author_already += 1
-                        break
+            # 预检：只查历史记录（双层：活跃 + 归档ID集合）
+            author_already = sum(1 for v in author_all_videos if v.get("id") and self._is_downloaded(v["id"]))
             author_pending = author_total - author_already
 
             self._log(f"  预检: 共 {author_total} 个视频，已下载 {author_already}，待下载 {author_pending}")
