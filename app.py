@@ -387,23 +387,49 @@ class App:
         ttk.Button(self.search_author_frame, text="▶ 下载选中作者的视频", command=self._start_author_crawl).pack(side="left", padx=3)
         ttk.Button(self.search_author_frame, text="■ 停止", command=self._stop_crawl).pack(side="left", padx=3)
 
-        # 作者列表区域（搜作者模式时显示，在封面和进度之间）
-        self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="📋 作者队列（勾选要下载的）", padding=5)
+        # ===== 作者队列区域：Tag/Chip 标签式布局 =====
+        self.search_author_list_frame = ttk.LabelFrame(self.tab_search, text="📋 作者队列", padding=5)
         # 不 pack，由 _toggle_search_mode 控制显示
-        self.search_author_listbox_frame = ttk.Frame(self.search_author_list_frame)
-        self.search_author_listbox_frame.pack(fill="x")
+        self._author_queue_items = []  # 存储作者数据字典（不再用 BooleanVar）
+        self._author_selected = set()  # 存储已选中作者的 param（默认全选）
 
-        # 用 Canvas + Scrollbar + Checkbutton 实现可勾选列表（固定高度，不抢占空间）
-        self._author_canvas = tk.Canvas(self.search_author_listbox_frame, height=120)
-        self._author_scrollbar = ttk.Scrollbar(self.search_author_listbox_frame, orient="vertical", command=self._author_canvas.yview)
-        self._author_inner_frame = ttk.Frame(self._author_canvas)
-        self._author_inner_frame.bind("<Configure>", lambda e: self._author_canvas.configure(scrollregion=self._author_canvas.bbox("all")))
-        self._author_canvas.create_window((0, 0), window=self._author_inner_frame, anchor="nw")
-        self._author_canvas.configure(yscrollcommand=self._author_scrollbar.set)
+        queue_inner = ttk.Frame(self.search_author_list_frame)
+        queue_inner.pack(fill="x")
+
+        # 上方工具行：统计 + 操作按钮
+        queue_toolbar = ttk.Frame(queue_inner)
+        queue_toolbar.pack(fill="x", pady=(0, 3))
+
+        self._author_count_label = ttk.Label(queue_toolbar, text="队列: 0 人 | 0 个视频",
+                                              font=("Microsoft YaHei", 9))
+        self._author_count_label.pack(side="left")
+        ttk.Separator(queue_toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        ttk.Button(queue_toolbar, text="全选", width=5,
+                   command=self._select_all_authors).pack(side="left", padx=2)
+        ttk.Button(queue_toolbar, text="取消", width=5,
+                   command=self._deselect_all_authors).pack(side="left", padx=2)
+        ttk.Button(queue_toolbar, text="清空", width=5,
+                   command=self._clear_author_queue).pack(side="left", padx=2)
+
+        # Tag 容器：Canvas 横向流式排列，支持滚动
+        self._author_canvas = tk.Canvas(queue_inner, height=90,
+                                        highlightthickness=1, highlightbackground="#ddd")
+        _auth_h_scroll = ttk.Scrollbar(queue_inner, orient="horizontal",
+                                       command=self._author_canvas.xview)
+        _auth_v_scroll = ttk.Scrollbar(queue_inner, orient="vertical",
+                                       command=self._author_canvas.yview)
+        self._author_tag_frame = ttk.Frame(self._author_canvas)
+        self._author_canvas.create_window((0, 0), window=self._author_tag_frame, anchor="nw")
+        self._author_tag_frame.bind("<Configure>",
+            lambda e: self._author_canvas.configure(scrollregion=self._author_canvas.bbox("all")))
+        # 鼠标滚轮支持
+        self._author_canvas.bind("<MouseWheel>",
+            lambda e: self._author_canvas.xview_scroll(int(-1 * (e.delta / 120)), "units"))
+        self._author_canvas.configure(xscrollcommand=_auth_h_scroll.set,
+                                      yscrollcommand=_auth_v_scroll.set)
         self._author_canvas.pack(side="left", fill="both", expand=True)
-        self._author_scrollbar.pack(side="right", fill="y")
-
-        self._author_check_vars = []  # 存储作者勾选变量
+        _auth_v_scroll.pack(side="right", fill="y")
 
         # 下方区域：左边封面 + 右边进度
         bottom_frame = ttk.Frame(self.tab_search)
@@ -513,14 +539,14 @@ class App:
         keywords = [k.strip() for k in re.split(r'[,，\n\s]+', raw_keywords) if k.strip()]
 
         if not append:
-            # 非追加模式：清空旧列表
-            for widget in self._author_inner_frame.winfo_children():
+            # 非追加模式：清空旧队列
+            for widget in self._author_tag_frame.winfo_children():
                 widget.destroy()
-            self._author_check_vars.clear()
+            self._author_queue_items.clear()
+            self._author_selected.clear()
 
-        existing_count = len(self._author_check_vars)
-        mode_text = "追加" if append else "搜索"
-        self.search_overall_label.config(text=f"正在{mode_text}搜索 {len(keywords)} 个关键词...")
+        mode_text = "追加搜索" if append else "搜索"
+        self.search_overall_label.config(text=f"正在{mode_text} {len(keywords)} 个关键词...")
 
         def run():
             try:
@@ -531,14 +557,14 @@ class App:
                 )
                 all_new_authors = []
                 # 多关键词：逐个搜索并合并结果
+                existing_params = {a["param"] for a in self._author_queue_items}
                 for kw in keywords:
                     if append:
                         self.root.after(0, lambda k=kw: self.search_overall_label.config(
                             text=f"追加搜索中... 关键词: {k}"
                         ))
                     found = crawler.search_authors(kw)
-                    # 去重（按 param 去重，防止不同关键词搜到同一作者）
-                    existing_params = {a["param"] for _, a in self._author_check_vars}
+                    # 按 param 去重
                     for a in found:
                         if a.get("param", "") not in existing_params:
                             all_new_authors.append(a)
@@ -549,7 +575,7 @@ class App:
                 # 为每个新作者获取总页数
                 if authors:
                     self.root.after(0, lambda: self.search_overall_label.config(
-                        text=f"找到 {len(authors)} 个新作者，正在获取页数信息..."
+                        text=f"找到 {len(authors)} 个新作者，正在获取页数..."
                     ))
                     for author in authors:
                         try:
@@ -563,10 +589,8 @@ class App:
 
             def show_results():
                 if not authors:
-                    mode_text = "追加" if append else "搜索"
-                    self.search_overall_label.config(
-                        text=f"{mode_text}: 未找到新作者"
-                    )
+                    mt = "追加" if append else "搜索"
+                    self.search_overall_label.config(text=f"{mt}: 未找到新作者")
                     return
 
                 # 找出最大页数，用于设置 Spinbox 的上限
@@ -575,63 +599,145 @@ class App:
                 self.search_author_page_start_var.set(1)
                 self.search_author_page_end_var.set(max(old_end_val, max_pages))
 
-                total_in_queue = len(self._author_check_vars) + len(authors)
-                new_videos = sum(a.get("count", 0) for a in authors)
-                mode_text = "追加了" if append else "搜索到"
-
-                self.search_overall_label.config(
-                    text=f"作者队列: 共 {total_in_queue} 人（本次{mode_text} {len(authors)} 人）"
-                )
-
-                # 累加统计到已有标签
-                old_found_text = self.search_stats_found_label.cget("text")
-                # 解析已有视频数
-                import re as _re
-                old_match = _re.search(r'(\d+)', old_found_text)
-                old_video_count = int(old_match.group(1)) if old_match else 0
-                total_videos = old_video_count + new_videos
-                self.search_stats_found_label.config(text=f"队列共{total_videos}个视频")
-
+                # 添加到队列（默认选中）
                 for author in authors:
-                    var = tk.BooleanVar(value=True)
-                    self._author_check_vars.append((var, author))
-                    page_info = f"{author['count']} 个视频，{author.get('page_count', '?')} 页"
-                    cb = ttk.Checkbutton(
-                        self._author_inner_frame,
-                        text=f"{author['name']}  （{page_info}）",
-                        variable=var
-                    )
-                    cb.pack(anchor="w", pady=1)
+                    self._author_queue_items.append(author)
+                    self._author_selected.add(author.get("param", ""))
+                    self._add_author_tag(author)
+
+                self._update_queue_stats()
+
+                total = len(self._author_queue_items)
+                mt2 = "追加了" if append else "搜索到"
+                self.search_overall_label.config(
+                    text=f"作者队列: 共 {total} 人（本次{mt2} {len(authors)} 人）"
+                )
 
             self.root.after(0, show_results)
 
         threading.Thread(target=run, daemon=True).start()
 
     def _select_all_authors(self):
-        """全选作者"""
-        for var, _ in self._author_check_vars:
-            var.set(True)
+        """全选：所有标签变为选中态"""
+        self._author_selected.update(item["param"] for item in self._author_queue_items)
+        self._refresh_author_tags()
 
     def _deselect_all_authors(self):
         """取消全选"""
-        for var, _ in self._author_check_vars:
-            var.set(False)
+        self._author_selected.clear()
+        self._refresh_author_tags()
 
     def _clear_author_queue(self):
-        """清空作者队列"""
-        if not self._author_check_vars:
-            self.search_overall_label.config(text="队列已空")
+        """清空整个作者队列"""
+        if not self._author_queue_items:
             return
-
-        count = len(self._author_check_vars)
+        count = len(self._author_queue_items)
         if not messagebox.askyesno("确认清空", f"确认清空 {count} 个作者？"):
             return
-        for widget in self._author_inner_frame.winfo_children():
+        # 销毁所有 Tag 子控件
+        for widget in self._author_tag_frame.winfo_children():
             widget.destroy()
-        self._author_check_vars.clear()
-        self.search_overall_label.config(text="作者队列为空")
-        self.search_stats_found_label.config(text="")
-        self.search_stats_done_label.config(text="")
+        self._author_queue_items.clear()
+        self._author_selected.clear()
+        self._update_queue_stats()
+
+    def _add_author_tag(self, author: dict):
+        """添加一个作者标签（chip）到队列"""
+        name = author.get("name", "未知")
+        count = author.get("count", 0)
+        pages = author.get("page_count", "?")
+        param = author.get("param", name)
+
+        # 标签容器 Frame
+        chip = ttk.Frame(self._author_tag_frame,
+                         relief="solid", borderwidth=1)
+
+        # 选中状态背景色（用 Label 模拟）
+        is_selected = param in self._author_selected
+        bg_color = "#e3f2fd" if is_selected else "#f5f5f5"
+        fg_color = "#1565c0" if is_selected else "#666"
+
+        chip_content = tk.Frame(chip, bg=bg_color, cursor="hand2")
+        chip_content.pack(padx=1, pady=1, fill="both", expand=True)
+
+        # 作者名字 + 信息
+        info_label = tk.Label(chip_content, text=f"{name}\n{count}个视频·{pages}页",
+                              font=("Microsoft YaHei", 8),
+                              bg=bg_color, fg=fg_color,
+                              padx=6, pady=2, justify="center")
+        info_label.pack(side="left")
+
+        # ✕ 删除按钮
+        btn_del = tk.Label(chip_content, text="✕", font=("Arial", 9, "bold"),
+                           bg=bg_color, fg="#999",
+                           padx=3, pady=1, cursor="hand2")
+        btn_del.pack(side="right")
+
+        # 点击标签 → 切换选中/取消
+        def toggle(e=None, p=param, c=chip_content, il=info_label, bd=btn_del):
+            if p in self._author_selected:
+                self._author_selected.discard(p)
+                new_bg = "#f5f5f5"
+                new_fg = "#666"
+            else:
+                self._author_selected.add(p)
+                new_bg = "#e3f2fd"
+                new_fg = "#1565c0"
+            c.config(bg=new_bg)
+            il.config(bg=new_bg, fg=new_fg)
+            bd.config(bg=new_bg)
+
+        chip_content.bind("<Button-1>", toggle)
+        info_label.bind("<Button-1>", lambda e, t=toggle: t())
+
+        # 点击 ✕ → 从队列移除
+        def remove_tag(p=param):
+            for i, item in enumerate(self._author_queue_items):
+                if item["param"] == p:
+                    self._author_queue_items.pop(i)
+                    self._author_selected.discard(p)
+                    chip.destroy()
+                    break
+            self._update_queue_stats()
+
+        btn_del.bind("<Button-1>", lambda e, r=remove_tag: r())
+
+        chip.pack(side="left", padx=2, pady=2)
+
+    def _refresh_author_tags(self):
+        """刷新所有标签的选中态外观"""
+        for child in self._author_tag_frame.winfo_children():
+            # 每个 child 是一个 ttk.Frame(chip)，内部第一个子 frame 是 chip_content
+            content = child.winfo_children()[0] if child.winfo_children() else None
+            if not content:
+                continue
+            labels = content.winfo_children()  # [info_label, btn_del]
+            if len(labels) < 2:
+                continue
+            # 找出这个 chip 对应的 param（通过遍历位置或存储引用）
+            idx = list(self._author_tag_frame.winfo_children()).index(child)
+            if idx >= len(self._author_queue_items):
+                continue
+            param = self._author_queue_items[idx]["param"]
+            is_sel = param in self._author_selected
+            bg = "#e3f2fd" if is_sel else "#f5f5f5"
+            fg = "#1565c0" if is_sel else "#666"
+            for lbl in labels:
+                lbl.config(bg=bg)
+                if lbl == labels[0]:  # info label
+                    lbl.config(fg=fg)
+            content.config(bg=bg, cursor="hand2")
+
+    def _update_queue_stats(self):
+        """更新队列统计信息"""
+        total = len(self._author_queue_items)
+        videos = sum(a.get("count", 0) for a in self._author_queue_items)
+        sel_count = len(self._author_selected & {a["param"] for a in self._author_queue_items})
+        self._author_count_label.config(
+            text=f"队列: {total} 人 | {videos} 个视频 | 已选 {sel_count}"
+        )
+        # 同步更新右侧统计标签
+        self.search_stats_found_label.config(text=f"队列共{videos}个视频")
 
     def _start_author_crawl(self):
         """下载选中作者的视频"""
@@ -643,7 +749,7 @@ class App:
             messagebox.showwarning("警告", "请先选择站点")
             return
 
-        selected = [author for var, author in self._author_check_vars if var.get()]
+        selected = [a for a in self._author_queue_items if a.get("param") in self._author_selected]
         if not selected:
             messagebox.showwarning("警告", "请勾选至少一个作者")
             return
