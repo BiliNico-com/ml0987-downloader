@@ -1720,34 +1720,36 @@ class App:
 
     def _confirm_dialog(self, opts: dict) -> str:
         """倒计时确认弹窗（线程安全），返回用户选择的 value
-        opts: {
-            "title": str,
-            "message": str,
-            "choices": [(value, label), ...],
-            "default": value,   # 默认选中
-            "countdown": int     # 秒数
-        }
+
+        改进：
+        - 不使用 grab_set()，停止按钮仍可点击
+        - 倒计时每秒检测 _stop_flag，被停止时自动关闭弹窗
+        - wait 用轮询替代阻塞，确保能响应停止信号
         """
         result = {"value": opts.get("default", opts["choices"][0][0])}
         ready = threading.Event()
+        dialog_ref = [None]  # 引用弹窗，用于外部销毁
 
         def _show():
             try:
                 dialog = tk.Toplevel(self.root)
                 dialog.title(opts.get("title", "提示"))
-                dialog.geometry("480x220")
+                dialog.geometry("480x200")
                 dialog.resizable(False, False)
                 dialog.attributes("-topmost", True)
-                dialog.grab_set()
+                # 关键：不用 grab_set()，让主界面保持可操作！
+                dialog.transient(self.root)
 
                 # 居中
                 dialog.update_idletasks()
                 x = (dialog.winfo_screenwidth() // 2) - 240
-                y = (dialog.winfo_screenheight() // 2) - 110
-                dialog.geometry(f"480x220+{x}+{y}")
+                y = (dialog.winfo_screenheight() // 2) - 100
+                dialog.geometry(f"480x200+{x}+{y}")
+
+                dialog_ref[0] = dialog
 
                 # 消息
-                msg_frame = tk.Frame(dialog, pady=10)
+                msg_frame = tk.Frame(dialog, pady=8)
                 msg_frame.pack(fill="both", expand=True)
                 tk.Label(
                     msg_frame, text=opts.get("message", ""),
@@ -1761,30 +1763,53 @@ class App:
                 )
                 countdown_label.pack(pady=(5, 0))
 
-                btn_frame = tk.Frame(dialog, pady=10)
+                btn_frame = tk.Frame(dialog, pady=6)
                 btn_frame.pack()
 
                 remaining = {"count": opts.get("countdown", 10)}
                 selected = {"value": opts.get("default", opts["choices"][0][0])}
                 timer_job = {"id": None}
+                _closed = [False]
+
+                def do_close():
+                    """安全关闭弹窗"""
+                    if _closed[0]:
+                        return
+                    _closed[0] = True
+                    if timer_job["id"]:
+                        try:
+                            dialog.after_cancel(timer_job["id"])
+                        except Exception:
+                            pass
+                    try:
+                        dialog.destroy()
+                    except Exception:
+                        pass
+                    ready.set()
 
                 def update_countdown():
+                    if _closed[0]:
+                        return
+                    # 每秒检测是否已被用户停止
+                    if self.crawler and getattr(self.crawler, '_stop_flag', False):
+                        result["value"] = opts["choices"][-1][0] if opts["choices"] else opts.get("default", "")
+                        do_close()
+                        return
                     if remaining["count"] > 0:
-                        default_label = next(l for v, l in opts['choices'] if v == selected['value'])
+                        default_label = next((l for v, l in opts['choices'] if v == selected['value']), "")
                         countdown_label.config(text=f"【{remaining['count']} 秒后自动选择「{default_label}」】")
                         remaining["count"] -= 1
                         timer_job["id"] = dialog.after(1000, update_countdown)
                     else:
                         # 超时，选默认值
-                        dialog.destroy()
+                        result["value"] = selected["value"]
+                        do_close()
 
                 def on_select(value, label):
-                    if timer_job["id"]:
-                        dialog.after_cancel(timer_job["id"])
-                    selected["value"] = value
+                    if _closed[0]:
+                        return
                     result["value"] = value
-                    ready.set()
-                    dialog.destroy()
+                    do_close()
 
                 # 创建按钮
                 for value, label in opts["choices"]:
@@ -1810,12 +1835,32 @@ class App:
                 dialog.protocol("WM_DELETE_WINDOW", lambda: on_select(
                     opts["choices"][-1][0], opts["choices"][-1][1]
                 ))
-            except Exception:
+            except Exception as e:
                 result["value"] = opts.get("default", opts["choices"][0][0])
                 ready.set()
 
         self.root.after(0, _show)
-        ready.wait(timeout=opts.get("countdown", 10) + 2)
+
+        # 轮询等待（替代阻塞式 ready.wait），支持中途检测停止信号
+        deadline = time.time() + opts.get("countdown", 10) + 5
+        while time.time() < deadline:
+            if ready.is_set():
+                break
+            # 检查是否被停止了 → 强制关闭弹窗
+            if self.crawler and getattr(self.crawler, '_stop_flag', False):
+                if dialog_ref[0]:
+                    try:
+                        if dialog_ref[0].winfo_exists():
+                            dialog_ref[0].destroy()
+                    except Exception:
+                        pass
+                ready.set()
+                break
+            time.sleep(0.3)
+        else:
+            if not ready.is_set():
+                ready.set()
+
         return result["value"]
 
     def _update_progress(self, progressbar, current, total, label_widget=None, label_text=None):
