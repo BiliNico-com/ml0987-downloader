@@ -147,6 +147,7 @@ class App:
         # 爬虫核心
         self.crawler = None
         self.crawl_thread = None
+        self._crawl_stopping = False  # 独立停止标志（弹窗轮询用，不依赖 crawler 对象）
 
         # 封面图片缓存
         self._cover_photo = None  # 保持引用防止 GC
@@ -744,6 +745,16 @@ class App:
         if self.crawl_thread and self.crawl_thread.is_alive():
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
+
+        self._crawl_stopping = False  # 重置停止标志
+
+        # 清理上一次残留的 crawler
+        if self.crawler:
+            try:
+                self.crawler.stop()
+            except Exception:
+                pass
+            self.crawler = None
 
         if not self.search_site_var.get().strip():
             messagebox.showwarning("警告", "请先选择站点")
@@ -1790,8 +1801,9 @@ class App:
                 def update_countdown():
                     if _closed[0]:
                         return
-                    # 每秒检测是否已被用户停止
-                    if self.crawler and getattr(self.crawler, '_stop_flag', False):
+                    # 每秒检测是否已被用户停止（用独立标志，不依赖 crawler 对象）
+                    if getattr(self, '_crawl_stopping', False) or \
+                       (self.crawler and getattr(self.crawler, '_stop_flag', False)):
                         result["value"] = opts["choices"][-1][0] if opts["choices"] else opts.get("default", "")
                         do_close()
                         return
@@ -1847,7 +1859,8 @@ class App:
             if ready.is_set():
                 break
             # 检查是否被停止了 → 强制关闭弹窗
-            if self.crawler and getattr(self.crawler, '_stop_flag', False):
+            if getattr(self, '_crawl_stopping', False) or \
+               (self.crawler and getattr(self.crawler, '_stop_flag', False)):
                 if dialog_ref[0]:
                     try:
                         if dialog_ref[0].winfo_exists():
@@ -1916,6 +1929,8 @@ class App:
         if self.crawl_thread and self.crawl_thread.is_alive():
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
+
+        self._crawl_stopping = False
 
         if not self.search_site_var.get().strip():
             messagebox.showwarning("警告", "请先选择站点")
@@ -2034,6 +2049,8 @@ class App:
             messagebox.showwarning("警告", "正在运行中，请先停止")
             return
 
+        self._crawl_stopping = False
+
         if not self.site_var.get().strip():
             messagebox.showwarning("警告", "请先选择站点")
             return
@@ -2113,9 +2130,11 @@ class App:
             except Exception:
                 pass
             self.crawler.stop()
-            # 不再在主线程 join，避免卡顿；线程设为 daemon 会自动清理
+            # 设置独立停止标志（关键：在清空引用之前设好，否则弹窗轮询检测不到）
+            self._crawl_stopping = True
+            # 不立即置空 self.crawler！后台线程可能还在弹窗 confirm_dialog 里等待
+            # 等线程自然结束后再清理（daemon 线程会自动回收）
             self.crawl_thread = None
-            self.crawler = None
             self._status_to_ui(self.crawl_status_text, "── 已停止 ──")
             self._status_to_ui(self.single_log_text, "── 已停止 ──")
             self._status_to_ui(self.search_status_text, "── 已停止 ──")
