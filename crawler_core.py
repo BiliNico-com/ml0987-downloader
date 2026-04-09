@@ -1410,50 +1410,49 @@ class CrawlerCore:
                         })
                         if choice == "retry" and not self._stop_flag:
                             self._log(f"开始重试 {len(failed)} 个未完成视频...")
-                        for url, title, vid in failed:
-                            if self._stop_flag:
-                                break
-                            try:
-                                ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
-                                if ok:
-                                    if vid and self._history.get(vid, {}).get("download_time"):
-                                        total_success += 1
-                                        author_success += 1
-                                    else:
-                                        total_skipped += 1
-                                        author_skipped += 1
-                                    # 重试成功的从失败列表移除
-                                    failed_by_author[author_name].remove((url, title, vid))
-                            except Exception as e:
-                                self._log(f"重试失败: {title} ({e})", "error")
-                            time.sleep(2)
-                        self._log(f"重试完成，剩余 {len(failed_by_author[author_name])} 个未完成")
+                            for url, title, vid in failed:
+                                if self._stop_flag:
+                                    break
+                                try:
+                                    ok = self.download_single(url, title, video_id=vid, output_dir=author_output_dir)
+                                    if ok:
+                                        if vid and self._history.get(vid, {}).get("download_time"):
+                                            total_success += 1
+                                            author_success += 1
+                                        else:
+                                            total_skipped += 1
+                                            author_skipped += 1
+                                        # 重试成功的从失败列表移除
+                                        failed_by_author[author_name].remove((url, title, vid))
+                                except Exception as e:
+                                    self._log(f"重试失败: {title} ({e})", "error")
+                                time.sleep(2)
+                            self._log(f"重试完成，剩余 {len(failed_by_author[author_name])} 个未完成")
 
-            # ===== 询问是否继续下一作者 =====
-            remaining = authors.index(author_info) + 1
-            if remaining < len(authors) and self.confirm_callback and not self._stop_flag:
-                next_author = authors[remaining].get("name", "未知作者")
-                still_failed = len(failed_by_author[author_name])
-                msg = (
-                    f"作者「{author_name}」全部处理完毕\n"
-                    f"已下载: {author_success + author_skipped}/{total_videos}"
-                    + (f"\n未完成: {still_failed} 个" if still_failed else "")
-                    + f"\n\n是否继续下载下一作者「{next_author}」？"
-                )
-                choice = self.confirm_callback({
-                    "title": "是否继续下一作者",
-                    "message": msg,
-                    "choices": [("yes", "是，继续下载"), ("no", "否，停止")],
-                    "default": "yes",
-                    "countdown": 10,
-                })
-                if choice != "yes":
-                    self._log("用户停止，退出批量下载")
-                    break
-        except Exception as cb_err:
+                    # ===== 询问是否继续下一作者 =====
+                    remaining = authors.index(author_info) + 1
+                    if remaining < len(authors) and not self._stop_flag:
+                        next_author = authors[remaining].get("name", "未知作者")
+                        still_failed = len(failed_by_author[author_name])
+                        msg = (
+                            f"作者「{author_name}」全部处理完毕\n"
+                            f"已下载: {author_success + author_skipped}/{total_videos}"
+                            + (f"\n未完成: {still_failed} 个" if still_failed else "")
+                            + f"\n\n是否继续下载下一作者「{next_author}」？"
+                        )
+                        choice = self.confirm_callback({
+                            "title": "是否继续下一作者",
+                            "message": msg,
+                            "choices": [("yes", "是，继续下载"), ("no", "否，停止")],
+                            "default": "yes",
+                            "countdown": 10,
+                        })
+                        if choice != "yes":
+                            self._log("用户停止，退出批量下载")
+                            break
+                except Exception as cb_err:
                     # 确认弹窗出错时记录日志但不中断整个循环
                     self._log(f"确认弹窗异常（已自动跳过）: {cb_err}", "error")
-                    # 弹窗失败默认继续下一作者
                     pass
 
         self._log(f"作者爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
