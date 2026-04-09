@@ -589,7 +589,7 @@ class CrawlerCore:
         self._archive_ids: set = self._load_archive_ids()  # 归档 ID 集合（仅ID，极轻量）
         self._dirty = False                             # 脏标记：是否有未保存的变更
         self._pending_count = 0                         # 待写入计数
-        self._lock = threading.Lock()                   # 线程安全锁
+        self._lock = threading.RLock()                  # 可重入锁（RLock）—— _mark_downlocked 内部会调用 _archive_old_records，两者都需加锁，必须用 RLock 防死锁！
 
     def _get_history_path(self) -> Path:
         """获取下载记录文件路径"""
@@ -708,9 +708,22 @@ class CrawlerCore:
             self._save_archive_ids()
 
     def flush_history(self):
-        """手动刷新：将内存中未保存的变更立即写入磁盘（程序退出时调用）"""
-        if self._dirty:
-            self._save_history()
+        """手动刷新：将内存中未保存的变更立即写入磁盘（程序退出/停止时调用）
+        
+        使用非阻塞方式：只尝试获取锁一次，拿不到就跳过。
+        停止时调用此方法不能阻塞主线程（否则 tkinter UI 会未响应）。
+        """
+        if not self._dirty:
+            return
+        acquired = self._lock.acquire(blocking=False)  # 非阻塞尝试
+        if acquired:
+            try:
+                self._save_history()
+            finally:
+                self._lock.release()
+        else:
+            # 锁被下载线程持有（可能正在归档），记录日志但不阻塞
+            logger.warning("flush_history: 锁被占用，跳过本次写入（数据不会丢失，下次会写）")
 
     def _log(self, message: str, level: str = "info"):
         """日志回调"""
@@ -1269,7 +1282,27 @@ class CrawlerCore:
                     author_all_videos.append(v)
 
             author_total = len(author_all_videos)
-            author_already = sum(1 for v in author_all_videos if v.get("id") and self._is_downloaded(v["id"]))
+            # 预检：同时检查下载历史 + 磁盘文件（双重检查更准确）
+            output_root = Path(self.config.get("output_dir", "downloads"))
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            author_already = 0
+            for v in author_all_videos:
+                vid = v.get("id")
+                if vid and self._is_downloaded(vid):
+                    author_already += 1
+                    continue
+                # 补充检查磁盘文件是否已存在（处理历史记录丢失但文件还在的情况）
+                title = v.get("title") or f"视频_{vid}"
+                if self.config.get("title_with_author"):
+                    # 预检时无法确定作者名，用标题模糊匹配
+                    pass
+                mp4_name = f"{sanitize_filename(title)}.mp4"
+                # 检查可能的目录位置
+                for check_dir in [output_root / date_str / sanitize_filename(author_param),
+                                  output_root / date_str]:
+                    if (check_dir / mp4_name).exists():
+                        author_already += 1
+                        break
             author_pending = author_total - author_already
 
             self._log(f"  预检: 共 {author_total} 个视频，已下载 {author_already}，待下载 {author_pending}")
@@ -1358,24 +1391,25 @@ class CrawlerCore:
             self._log(f"===== 作者 {author_name} 完成：已下载 {author_success + author_skipped}/{total_videos} =====")
 
             if self.confirm_callback:
-                failed = failed_by_author[author_name]
-                if failed:
-                    # 有失败视频，询问是否重试
-                    msg = (
-                        f"作者「{author_name}」视频下载完成\n"
-                        f"已下载: {author_success + author_skipped} / 共 {total_videos}\n"
-                        f"未完成: {len(failed)} 个\n\n"
-                        f"是否重新下载未完成的 {len(failed)} 个视频？"
-                    )
-                    choice = self.confirm_callback({
-                        "title": "作者视频下载完成",
-                        "message": msg,
-                        "choices": [("retry", f"是，重新下载 ({len(failed)} 个)"), ("skip", "否，跳过")],
-                        "default": "retry",
-                        "countdown": 10,
-                    })
-                    if choice == "retry" and not self._stop_flag:
-                        self._log(f"开始重试 {len(failed)} 个未完成视频...")
+                try:
+                    failed = failed_by_author[author_name]
+                    if failed:
+                        # 有失败视频，询问是否重试
+                        msg = (
+                            f"作者「{author_name}」视频下载完成\n"
+                            f"已下载: {author_success + author_skipped} / 共 {total_videos}\n"
+                            f"未完成: {len(failed)} 个\n\n"
+                            f"是否重新下载未完成的 {len(failed)} 个视频？"
+                        )
+                        choice = self.confirm_callback({
+                            "title": "作者视频下载完成",
+                            "message": msg,
+                            "choices": [("retry", f"是，重新下载 ({len(failed)} 个)"), ("skip", "否，跳过")],
+                            "default": "retry",
+                            "countdown": 10,
+                        })
+                        if choice == "retry" and not self._stop_flag:
+                            self._log(f"开始重试 {len(failed)} 个未完成视频...")
                         for url, title, vid in failed:
                             if self._stop_flag:
                                 break
@@ -1416,6 +1450,11 @@ class CrawlerCore:
                 if choice != "yes":
                     self._log("用户停止，退出批量下载")
                     break
+        except Exception as cb_err:
+                    # 确认弹窗出错时记录日志但不中断整个循环
+                    self._log(f"确认弹窗异常（已自动跳过）: {cb_err}", "error")
+                    # 弹窗失败默认继续下一作者
+                    pass
 
         self._log(f"作者爬取完成 — 新下载: {total_success}，跳过: {total_skipped}")
         self.flush_history()

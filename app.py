@@ -1854,7 +1854,9 @@ class App:
         self.root.after(0, _show)
 
         # 轮询等待（替代阻塞式 ready.wait），支持中途检测停止信号
-        deadline = time.time() + opts.get("countdown", 10) + 5
+        countdown_secs = opts.get("countdown", 10)
+        # 安全上限：倒计时 + 30秒缓冲（给用户操作和弹窗渲染时间）
+        deadline = time.time() + countdown_secs + 30
         while time.time() < deadline:
             if ready.is_set():
                 break
@@ -1871,8 +1873,11 @@ class App:
                 break
             time.sleep(0.3)
         else:
+            # 超时了还没结果（极端情况），强制设为默认值返回
             if not ready.is_set():
+                result["value"] = opts.get("default", opts["choices"][0][0] if opts.get("choices") else "")
                 ready.set()
+                self._log_to_search_ui(f"⚠ 确认弹窗超时，自动选择默认值: {result['value']}", "warn")
 
         return result["value"]
 
